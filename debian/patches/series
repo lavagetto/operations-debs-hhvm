@@ -6,3 +6,8 @@ remove_libpam
 fix_freetype_include
 typos
 public_headers_system
+
+# Wikimedia-specific patches
+Fix-boundary-cases-of-strspn-strcspn-and-substr_repl.patch
+Support-stream-wrappers-in-XML-parser-extensions.patch
+Allow-MixedArray-MakeReserveLike-to-work-on-arrays-w.patch

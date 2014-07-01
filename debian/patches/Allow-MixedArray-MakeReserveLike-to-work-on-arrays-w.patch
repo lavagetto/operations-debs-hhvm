@@ -1,0 +1,44 @@
+From 5a908e3f3b1e2f98e654c3933e9be7eff80b0b47 Mon Sep 17 00:00:00 2001
+From: Tim Starling <tstarling@wikimedia.org>
+Date: Mon, 30 Jun 2014 12:42:22 +1000
+Subject: [PATCH] Allow MixedArray::MakeReserveLike to work on arrays with
+ virtual size
+
+Previously this would try to create an array with 2^32 elements, causing
+an assertion or crash. array_map.hhas calls NewLikeArrayL on arbitrary
+input, which in turn calls MixedArray::MakeReserveLike. So any array
+originating from EZC would crash when fed into array_map().
+
+Added test case which previously crashed.
+---
+ hphp/runtime/base/mixed-array.cpp                            | 2 +-
+ hphp/test/slow/ext_ezc_test/array_map-proxyarray.php         | 2 ++
+ hphp/test/slow/ext_ezc_test/array_map-proxyarray.php.expectf | 5 +++++
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+ create mode 100644 hphp/test/slow/ext_ezc_test/array_map-proxyarray.php
+ create mode 100644 hphp/test/slow/ext_ezc_test/array_map-proxyarray.php.expectf
+
+--- a/hphp/runtime/base/mixed-array.cpp
++++ b/hphp/runtime/base/mixed-array.cpp
+@@ -78,7 +78,7 @@ ArrayData* MixedArray::MakeReserveMixed(
+ 
+ ArrayData* MixedArray::MakeReserveLike(const ArrayData* other,
+                                        uint32_t capacity) {
+-  capacity = (capacity ? capacity : other->m_size);
++  capacity = (capacity ? capacity : other->size());
+ 
+   if (other->m_kind == kPackedKind) {
+     return MixedArray::MakeReserve(capacity);
+--- /dev/null
++++ b/hphp/test/slow/ext_ezc_test/array_map-proxyarray.php
+@@ -0,0 +1,2 @@
++<?php
++var_dump(array_map('boolval', ezc_create_cloneable_in_array()));
+--- /dev/null
++++ b/hphp/test/slow/ext_ezc_test/array_map-proxyarray.php.expectf
+@@ -0,0 +1,5 @@
++EzcTestCloneable free_storage (clone 0)
++array(1) {
++  [0]=>
++  bool(true)
++}
