@@ -1,4 +1,4 @@
-hhvm (3.1+20140630-1) UNRELEASED; urgency=low
+hhvm (3.1+20140630-1+wm1) trusty-wikimedia; urgency=low
 
   [ David Martínez Moreno ]
   * Initial release (closes: #727085).
@@ -23,4 +23,4 @@ hhvm (3.1+20140630-1) UNRELEASED; urgency=low
     - public_headers_system: add header files from hphp/system/ too as at
       least systemlib.h is needed to build an extension.
 
- -- Faidon Liambotis <paravoid@debian.org>  Mon, 30 Jun 2014 17:22:40 +0000
+ -- Faidon Liambotis <faidon@wikimedia.org>  Tue, 01 Jul 2014 23:56:23 +0000
