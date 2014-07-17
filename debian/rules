@@ -29,9 +29,4 @@ endif
 override_dh_strip:
 	dh_strip --dbg-package=hhvm-dbg
 
-override_dh_auto_install:
-	dh_auto_install
-	install -m 0755 debian/hhvm.ini debian/etc/hhvm/hhvm.ini
-	install -m 0755 debian/config.hdf debian/etc/hhvm/config.hdf
-
 .PHONY: override_dh_auto_build override_dh_auto_configure override_dh_auto_test override_dh_strip

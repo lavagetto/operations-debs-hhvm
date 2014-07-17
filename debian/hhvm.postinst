@@ -1,0 +1,2 @@
+#!/bin/bash -e
+/usr/bin/update-alternatives --install /usr/bin/php php /usr/bin/hhvm 60
