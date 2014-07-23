@@ -1,0 +1,1399 @@
+From 8248cacba31c6d5b3059fafa9510c2f8cb65bd76 Mon Sep 17 00:00:00 2001
+From: bsimmers <bsimmers@fb.com>
+Date: Mon, 21 Jul 2014 17:24:57 -0700
+Subject: [PATCH] Support stream wrappers in XML parser extensions, add
+ external entity loader
+
+Summary:
+* Support stream wrappers in SimpleXML, DOM and XMLReader input and
+  output filenames.
+* Rename libxml_input_buffer() to libxml_create_input_buffer().
+* Implement userspace function libxml_set_streams_context(), was
+  previously missing.
+* Since the VM can now be re-entered during parsing, with libxml2 in the
+  call stack with -fomit-frame-pointer, all XML parsing functions must
+  be protected with SYNC_VM_REGS_SCOPED().
+* In DOMDocument, don't do File::TranslatePath() on input filenames,
+  since they can now be URLs, and translation is now redundant with that
+  done by FileStreamWrapper.
+* In simplexml_load_file(), call xmlReadFile() instead of
+  f_file_get_contents(), so that the libxml default stream context is
+  used. Almost fixes test/zend/bad/ext/libxml/tests/bug54440.php, except
+  for a minor error handling issue that should be dealt with by GitHub
+  PR #2376.
+* In stream_context_create(), return a default stream context resource
+  when the options fail validation, instead of returning false. This
+  matches the PHP behaviour and makes
+  hphp/test/zend/bad/ext/libxml/tests/bug63389.php pass.
+* Move passing tests to hphp/test/zend/good
+* Add test.xml, copied from PHP 5.6.0-dev, needed by a passing test.
+* Add an external entity loader. This allows the use of "data:" and
+  "compress.zlib:" in entities and URIs.
+
+Since loading external entities exposes a number of security issues including
+remote shell execution, it's disabled by default (except for the data: protocol
+which isn't actually external). The new config option is documented in
+doc/inconsistencies.
+
+Submitted on behalf of a third-party: The PHP Group
+Source: PHP 5.6.0-dev
+License: version 3.01 of the PHP license
+
+Closes: #2329
+Closes: #2829
+
+Test Plan: automated tests, new version of zend test to make sure external
+entity loading fails by default
+---
+ hphp/doc/inconsistencies                           |   5 +
+ hphp/runtime/base/stream-wrapper-registry.cpp      |  23 +-
+ hphp/runtime/base/stream-wrapper-registry.h        |   2 +
+ hphp/runtime/ext/ext_domdocument.cpp               |  81 ++++---
+ hphp/runtime/ext/ext_simplexml.cpp                 |  23 +-
+ hphp/runtime/ext/ext_xml.cpp                       |   2 +-
+ hphp/runtime/ext/ext_xmlreader.cpp                 |  16 ++
+ hphp/runtime/ext/libxml/ext_libxml.cpp             | 243 +++++++++++++++++++--
+ hphp/runtime/ext/libxml/ext_libxml.h               |   4 +
+ hphp/runtime/ext/libxml/ext_libxml.php             |   4 +
+ hphp/runtime/ext/stream/ext_stream.cpp             |   4 +-
+ hphp/runtime/ext/xsl/ext_xsl.cpp                   |   1 +
+ hphp/test/quick/xml_entity_loader.php              |  15 ++
+ hphp/test/quick/xml_entity_loader.php.expect       |   1 +
+ hphp/test/slow/dom_document/xinclude.php.ini       |   1 +
+ hphp/test/tools/import_zend_test.py                |   1 -
+ hphp/test/zend/bad/ext/libxml/tests/004.php        |  23 --
+ .../test/zend/bad/ext/libxml/tests/004.php.expectf |  29 ---
+ hphp/test/zend/bad/ext/libxml/tests/bug63389.php   |   6 -
+ .../zend/bad/ext/libxml/tests/bug63389.php.expectf |   3 -
+ hphp/test/zend/bad/ext/xsl/tests/xslt008.php       |  14 --
+ .../zend/bad/ext/xsl/tests/xslt008.php.expectf     |   7 -
+ .../test/zend/bad/ext/xsl/tests/xslt008.php.skipif |   4 -
+ hphp/test/zend/good/ext/libxml/tests/004.php       |  23 ++
+ .../zend/good/ext/libxml/tests/004.php.expectf     |  29 +++
+ hphp/test/zend/good/ext/libxml/tests/bug63389.php  |   6 +
+ .../good/ext/libxml/tests/bug63389.php.expectf     |   3 +
+ hphp/test/zend/good/ext/libxml/tests/test.xml      |   8 +
+ hphp/test/zend/good/ext/xsl/tests/bug53965.php     |  15 ++
+ .../zend/good/ext/xsl/tests/bug53965.php.expectf   |   4 +
+ hphp/test/zend/good/ext/xsl/tests/bug53965.php.ini |   1 +
+ .../zend/good/ext/xsl/tests/bug53965.php.skipif    |   3 +
+ .../zend/good/ext/xsl/tests/xslt008-disabled.php   |  14 ++
+ .../ext/xsl/tests/xslt008-disabled.php.expectf     |   8 +
+ hphp/test/zend/good/ext/xsl/tests/xslt008.php      |  14 ++
+ .../zend/good/ext/xsl/tests/xslt008.php.expectf    |   7 +
+ hphp/test/zend/good/ext/xsl/tests/xslt008.php.ini  |   1 +
+ .../zend/good/ext/xsl/tests/xslt008.php.norepo     |   0
+ .../zend/good/ext/xsl/tests/xslt008.php.skipif     |   4 +
+ hphp/util/trace.h                                  |   3 +-
+ 40 files changed, 492 insertions(+), 163 deletions(-)
+ create mode 100644 hphp/test/quick/xml_entity_loader.php
+ create mode 100644 hphp/test/quick/xml_entity_loader.php.expect
+ create mode 100644 hphp/test/slow/dom_document/xinclude.php.ini
+ delete mode 100644 hphp/test/zend/bad/ext/libxml/tests/004.php
+ delete mode 100644 hphp/test/zend/bad/ext/libxml/tests/004.php.expectf
+ delete mode 100644 hphp/test/zend/bad/ext/libxml/tests/bug63389.php
+ delete mode 100644 hphp/test/zend/bad/ext/libxml/tests/bug63389.php.expectf
+ delete mode 100644 hphp/test/zend/bad/ext/xsl/tests/xslt008.php
+ delete mode 100644 hphp/test/zend/bad/ext/xsl/tests/xslt008.php.expectf
+ delete mode 100644 hphp/test/zend/bad/ext/xsl/tests/xslt008.php.skipif
+ create mode 100644 hphp/test/zend/good/ext/libxml/tests/004.php
+ create mode 100644 hphp/test/zend/good/ext/libxml/tests/004.php.expectf
+ create mode 100644 hphp/test/zend/good/ext/libxml/tests/bug63389.php
+ create mode 100644 hphp/test/zend/good/ext/libxml/tests/bug63389.php.expectf
+ create mode 100644 hphp/test/zend/good/ext/libxml/tests/test.xml
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/bug53965.php
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/bug53965.php.expectf
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/bug53965.php.ini
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/bug53965.php.skipif
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php.expectf
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/xslt008.php
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/xslt008.php.expectf
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/xslt008.php.ini
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/xslt008.php.norepo
+ create mode 100644 hphp/test/zend/good/ext/xsl/tests/xslt008.php.skipif
+
+diff --git a/hphp/doc/inconsistencies b/hphp/doc/inconsistencies
+index a090e49..7748f4c 100644
+--- a/hphp/doc/inconsistencies
++++ b/hphp/doc/inconsistencies
+@@ -157,3 +157,8 @@ conversion inside the condition of an if statement or similar.
+ 
+ (7) All fatals prevent further PHP code from executing, including __destruct
+ methods. N.B.: exit() is a fatal.
++
++(8) Loading of external entities in the libxml extension is disabled by default
++for security reasons. It can be re-enabled on a per-protocol basis (file, http,
++compress.zlib, etc...) with a comma-separated list in the ini setting
++hhvm.libxml.ext_entity_whitelist.
+diff --git a/hphp/runtime/base/stream-wrapper-registry.cpp b/hphp/runtime/base/stream-wrapper-registry.cpp
+index 9711a5e..73490b6 100644
+--- a/hphp/runtime/base/stream-wrapper-registry.cpp
++++ b/hphp/runtime/base/stream-wrapper-registry.cpp
+@@ -182,25 +182,20 @@ Wrapper* getWrapper(const String& scheme, bool warn /*= false */) {
+   return nullptr;
+ }
+ 
+-Wrapper* getWrapperFromURI(const String& uri,
+-                           int* pathIndex /* = NULL */,
+-                           bool warn /*= true */) {
+-  const char *uri_string = uri.data();
+-
++String getWrapperProtocol(const char* uri_string, int* pathIndex) {
+   /* Special case for PHP4 Backward Compatability */
+   if (!strncasecmp(uri_string, "zlib:", sizeof("zlib:") - 1)) {
+-    return getWrapper(s_compress_zlib, warn);
++    return s_compress_zlib;
+   }
+ 
+   // data wrapper can come with or without a double forward slash
+   if (!strncasecmp(uri_string, "data:", sizeof("data:") - 1)) {
+-    return getWrapper(s_data, warn);
++    return s_data;
+   }
+ 
+   int n = 0;
+   const char* p = uri_string;
+-  while (*p && (isalnum((unsigned char)*p) ||
+-         *p == '+' || *p == '-' || *p == '.')) {
++  while (*p && (isalnum(*p) || *p == '+' || *p == '-' || *p == '.')) {
+     n++;
+     p++;
+   }
+@@ -210,12 +205,18 @@ Wrapper* getWrapperFromURI(const String& uri,
+   }
+ 
+   if (!colon) {
+-    return getWrapper(s_file, warn);
++    return s_file;
+   }
+ 
+   int len = colon - uri_string;
+   if (pathIndex != nullptr) *pathIndex = len + sizeof("://") - 1;
+-  return getWrapper(String(uri_string, len, CopyString), warn);
++  return String(uri_string, len, CopyString);
++}
++
++Wrapper* getWrapperFromURI(const String& uri,
++                           int* pathIndex /* = NULL */,
++                           bool warn /*= true */) {
++  return getWrapper(getWrapperProtocol(uri.data(), pathIndex), warn);
+ }
+ 
+ static FileStreamWrapper s_file_stream_wrapper;
+diff --git a/hphp/runtime/base/stream-wrapper-registry.h b/hphp/runtime/base/stream-wrapper-registry.h
+index fdb3a9e..5a67f0d 100644
+--- a/hphp/runtime/base/stream-wrapper-registry.h
++++ b/hphp/runtime/base/stream-wrapper-registry.h
+@@ -33,6 +33,8 @@ bool disableWrapper(const String& scheme);
+ bool restoreWrapper(const String& scheme);
+ bool registerRequestWrapper(const String& scheme, std::unique_ptr<Wrapper> wrapper);
+ Array enumWrappers();
++
++String getWrapperProtocol(const char* url, int* pathIndex = nullptr);
+ Wrapper* getWrapper(const String& scheme, bool warn = true);
+ Wrapper* getWrapperFromURI(const String& uri,
+                            int* pathIndex = nullptr, bool warn = true);
+diff --git a/hphp/runtime/ext/ext_domdocument.cpp b/hphp/runtime/ext/ext_domdocument.cpp
+index 687de2c..9f5a4bf 100644
+--- a/hphp/runtime/ext/ext_domdocument.cpp
++++ b/hphp/runtime/ext/ext_domdocument.cpp
+@@ -634,7 +634,7 @@ static xmlNsPtr dom_get_ns(xmlNodePtr nodep, const char *uri, int *errorcode,
+ }
+ 
+ static xmlDocPtr dom_document_parser(c_DOMDocument * domdoc, int mode,
+-                                     char *source, int source_len,
++                                     const String& source,
+                                      int options) {
+   xmlDocPtr ret = NULL;
+   xmlParserCtxtPtr ctxt = NULL;
+@@ -651,27 +651,36 @@ static xmlDocPtr dom_document_parser(c_DOMDocument * domdoc, int mode,
+   if (mode == DOM_LOAD_FILE) {
+     String file_dest = libxml_get_valid_file_path(source);
+     if (!file_dest.empty()) {
+-      ctxt = xmlCreateFileParserCtxt(file_dest.data());
++      // This is considerably more verbose than just using
++      // xmlCreateFileParserCtxt, but it allows us to bypass the external
++      // entity loading path, which is locked down by default for security
++      // reasons.
++      auto stream = File::Open(file_dest, "rb");
++      if (!stream.isInvalid()) {
++        // We're storing a reference in the xmlParserCtxt
++        stream.get()->incRefCount();
++        ctxt = xmlCreateIOParserCtxt(nullptr, nullptr,
++                                     libxml_streams_IO_read,
++                                     libxml_streams_IO_close,
++                                     stream.get(),
++                                     XML_CHAR_ENCODING_NONE);
++      }
+     }
+   } else {
+-    ctxt = xmlCreateMemoryParserCtxt(source, source_len);
++    ctxt = xmlCreateMemoryParserCtxt(source.data(), source.size());
+   }
+ 
+-  if (ctxt == NULL) {
+-    return NULL;
+-  }
++  if (ctxt == NULL) return NULL;
+ 
+-  /* If loading from memory, we need to set the base directory
+-     for the document */
++  /* If loading from memory, we need to set the base directory for the
++   * document */
+   if (mode != DOM_LOAD_FILE) {
+     String directory = g_context->getCwd();
+     if (!directory.empty()) {
+-      if (ctxt->directory != NULL) {
+-        xmlFree((char *) ctxt->directory);
+-      }
+-      if (directory[directory.size() - 1] != '/') {
+-        directory += "/";
+-      }
++      if (ctxt->directory != NULL) xmlFree(ctxt->directory);
++
++      if (directory[directory.size() - 1] != '/') directory += "/";
++
+       ctxt->directory =
+         (char*)xmlCanonicPath((const xmlChar*)directory.c_str());
+     }
+@@ -712,9 +721,15 @@ static xmlDocPtr dom_document_parser(c_DOMDocument * domdoc, int mode,
+     if (ctxt->recovery) {
+       HHVM_FN(error_reporting)(old_error_reporting);
+     }
+-    /* If loading from memory, set the base reference uri for the document */
+-    if (ret && ret->URL == NULL && ctxt->directory != NULL) {
+-      ret->URL = xmlStrdup((xmlChar*)ctxt->directory);
++    if (ret && ret->URL == NULL) {
++      if (mode == DOM_LOAD_FILE) {
++        ret->URL = xmlStrdup((xmlChar*)source.c_str());
++      } else {
++        /* If loading from memory, set the base reference uri for the document */
++        if (ctxt->directory != NULL) {
++          ret->URL = xmlStrdup((xmlChar*)ctxt->directory);
++        }
++      }
+     }
+   } else {
+     ret = NULL;
+@@ -734,8 +749,7 @@ static Variant dom_parse_document(c_DOMDocument *domdoc, const String& source,
+     return false;
+   }
+   xmlDoc *newdoc =
+-    dom_document_parser(domdoc, mode, (char*)source.data(), source.length(),
+-                        options);
++    dom_document_parser(domdoc, mode, source, options);
+   if (!newdoc) {
+     return false;
+   }
+@@ -3353,12 +3367,7 @@ Variant c_DOMDocument::t_importnode(const Object& importednode,
+ Variant c_DOMDocument::t_load(const String& filename,
+                               int64_t options /* = 0 */) {
+   SYNC_VM_REGS_SCOPED();
+-  String translated = File::TranslatePath(filename);
+-  if (translated.empty()) {
+-    raise_warning("Unable to read file: %s", filename.data());
+-    return false;
+-  }
+-  return dom_parse_document(this, translated, options, DOM_LOAD_FILE);
++  return dom_parse_document(this, filename, options, DOM_LOAD_FILE);
+ }
+ 
+ Variant c_DOMDocument::t_loadhtml(const String& source) {
+@@ -3368,12 +3377,7 @@ Variant c_DOMDocument::t_loadhtml(const String& source) {
+ 
+ Variant c_DOMDocument::t_loadhtmlfile(const String& filename) {
+   SYNC_VM_REGS_SCOPED();
+-  String translated = File::TranslatePath(filename);
+-  if (translated.empty()) {
+-    raise_warning("Unable to read file: %s", filename.data());
+-    return false;
+-  }
+-  return dom_load_html(this, translated, DOM_LOAD_FILE);
++  return dom_load_html(this, filename, DOM_LOAD_FILE);
+ }
+ 
+ Variant c_DOMDocument::t_loadxml(const String& source,
+@@ -3424,19 +3428,13 @@ Variant c_DOMDocument::t_save(const String& file, int64_t options /* = 0 */) {
+   xmlDocPtr docp = (xmlDocPtr)m_node;
+   int bytes, format = 0, saveempty = 0;
+ 
+-  String translated = File::TranslatePath(file);
+-  if (translated.empty()) {
+-    raise_warning("Invalid Filename");
+-    return false;
+-  }
+-
+   /* encoding handled by property on doc */
+   format = m_formatoutput;
+   if (options & LIBXML_SAVE_NOEMPTYTAG) {
+     saveempty = xmlSaveNoEmptyTags;
+     xmlSaveNoEmptyTags = 1;
+   }
+-  bytes = xmlSaveFormatFileEnc(translated.data(), docp, NULL, format);
++  bytes = xmlSaveFormatFileEnc(file.data(), docp, NULL, format);
+   if (options & LIBXML_SAVE_NOEMPTYTAG) {
+     xmlSaveNoEmptyTags = saveempty;
+   }
+@@ -3450,14 +3448,9 @@ Variant c_DOMDocument::t_savehtmlfile(const String& file) {
+   xmlDocPtr docp = (xmlDocPtr)m_node;
+   int bytes, format = 0;
+ 
+-  String translated = File::TranslatePath(file);
+-  if (translated.empty()) {
+-    raise_warning("Invalid Filename");
+-    return false;
+-  }
+   /* encoding handled by property on doc */
+   format = m_formatoutput;
+-  bytes = htmlSaveFileFormat(translated.data(), docp, NULL, format);
++  bytes = htmlSaveFileFormat(file.data(), docp, NULL, format);
+   if (bytes == -1) {
+     return false;
+   }
+diff --git a/hphp/runtime/ext/ext_simplexml.cpp b/hphp/runtime/ext/ext_simplexml.cpp
+index 235caf0..0609132 100644
+--- a/hphp/runtime/ext/ext_simplexml.cpp
++++ b/hphp/runtime/ext/ext_simplexml.cpp
+@@ -22,6 +22,7 @@
+ #include "hphp/runtime/ext/ext_domdocument.h"
+ #include "hphp/runtime/ext/libxml/ext_libxml.h"
+ #include "hphp/system/systemlib.h"
++#include "hphp/runtime/vm/vm-regs.h"
+ 
+ namespace HPHP {
+ 
+@@ -1128,6 +1129,7 @@ Variant f_simplexml_load_string(
+   int64_t options /* = 0 */,
+   const String& ns /* = "" */,
+   bool is_prefix /* = false */) {
++  SYNC_VM_REGS_SCOPED();
+   Class* cls = class_from_name(class_name, "simplexml_load_string");
+   if (!cls) {
+     return init_null();
+@@ -1152,8 +1154,24 @@ Variant f_simplexml_load_file(const String& filename,
+                               const String& class_name /* = "SimpleXMLElement" */,
+                               int64_t options /* = 0 */, const String& ns /* = "" */,
+                               bool is_prefix /* = false */) {
+-  String str = f_file_get_contents(filename);
+-  return f_simplexml_load_string(str, class_name, options, ns, is_prefix);
++  SYNC_VM_REGS_SCOPED();
++  Class* cls = class_from_name(class_name, "simplexml_load_file");
++  if (!cls) {
++    return init_null();
++  }
++
++  xmlDocPtr doc = xmlReadFile(filename.c_str(), nullptr, options);
++  if (!doc) {
++    return false;
++  }
++
++  Object obj = create_object(cls->nameStr(), Array(), false);
++  c_SimpleXMLElement* sxe = obj.getTyped<c_SimpleXMLElement>();
++  sxe->document = Resource(NEWOBJ(XmlDocWrapper)(doc));
++  sxe->node = xmlDocGetRootElement(doc);
++  sxe->iter.nsprefix = ns.size() ? xmlStrdup((xmlChar*)ns.data()) : nullptr;
++  sxe->iter.isprefix = is_prefix;
++  return obj;
+ }
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+@@ -1198,6 +1216,7 @@ void c_SimpleXMLElement::t___construct(const String& data,
+                                        bool data_is_url /* = false */,
+                                        const String& ns /* = "" */,
+                                        bool is_prefix /* = false */) {
++  SYNC_VM_REGS_SCOPED();
+   xmlDocPtr docp = data_is_url ?
+     xmlReadFile(data.data(), nullptr, options) :
+     xmlReadMemory(data.data(), data.size(), nullptr, nullptr, options);
+diff --git a/hphp/runtime/ext/ext_xml.cpp b/hphp/runtime/ext/ext_xml.cpp
+index 5b07ad8..3f8ab47 100644
+--- a/hphp/runtime/ext/ext_xml.cpp
++++ b/hphp/runtime/ext/ext_xml.cpp
+@@ -717,8 +717,8 @@ int64_t f_xml_parse(const Resource& parser, const String& data, bool is_final /*
+ 
+ int64_t f_xml_parse_into_struct(const Resource& parser, const String& data, VRefParam values,
+                             VRefParam index /* = null */) {
++  SYNC_VM_REGS_SCOPED();
+   int ret;
+-  VMRegAnchor _;
+   XmlParser * p = parser.getTyped<XmlParser>();
+   values = Array::Create();
+   p->data.assignRef(values);
+diff --git a/hphp/runtime/ext/ext_xmlreader.cpp b/hphp/runtime/ext/ext_xmlreader.cpp
+index 3d71769..2911309 100644
+--- a/hphp/runtime/ext/ext_xmlreader.cpp
++++ b/hphp/runtime/ext/ext_xmlreader.cpp
+@@ -22,6 +22,7 @@
+ #include "hphp/util/functional.h"
+ #include "hphp/util/hash-map-typedefs.h"
+ #include "hphp/system/systemlib.h"
++#include "hphp/runtime/vm/vm-regs.h"
+ 
+ namespace HPHP {
+ 
+@@ -112,6 +113,7 @@ void c_XMLReader::t___construct() {
+ }
+ 
+ bool c_XMLReader::t_open(const String& uri, const String& encoding /*= null_string*/, int64_t options /*= 0*/) {
++  SYNC_VM_REGS_SCOPED();
+   if (m_ptr) {
+     t_close();
+   }
+@@ -184,6 +186,7 @@ bool c_XMLReader::t_xml(const String& source, const String& encoding /*= null_st
+ }
+ 
+ void c_XMLReader::close_impl() {
++  SYNC_VM_REGS_SCOPED();
+   if (m_ptr) {
+     xmlFreeTextReader(m_ptr);
+     m_ptr = NULL;
+@@ -204,6 +207,7 @@ bool c_XMLReader::t_close() {
+ }
+ 
+ bool c_XMLReader::t_read() {
++  SYNC_VM_REGS_SCOPED();
+   if (m_ptr) {
+     int ret = xmlTextReaderRead(m_ptr);
+     if (ret == -1) {
+@@ -218,6 +222,7 @@ bool c_XMLReader::t_read() {
+ }
+ 
+ bool c_XMLReader::t_next(const String& localname /*= null_string*/) {
++  SYNC_VM_REGS_SCOPED();
+   if (m_ptr) {
+     int ret = xmlTextReaderNext(m_ptr);
+     while (!localname.empty() && ret == 1) {
+@@ -238,6 +243,7 @@ bool c_XMLReader::t_next(const String& localname /*= null_string*/) {
+ }
+ 
+ String c_XMLReader::read_string_func(xmlreader_read_char_t internal_function) {
++  SYNC_VM_REGS_SCOPED();
+   char *retchar = NULL;
+   if (m_ptr) {
+     retchar = (char *)internal_function(m_ptr);
+@@ -264,6 +270,7 @@ String c_XMLReader::t_readouterxml() {
+ }
+ 
+ bool c_XMLReader::bool_func_no_arg(xmlreader_read_int_t internal_function) {
++  SYNC_VM_REGS_SCOPED();
+   if (m_ptr) {
+     int ret = internal_function(m_ptr);
+     if (ret == 1) {
+@@ -274,6 +281,7 @@ bool c_XMLReader::bool_func_no_arg(xmlreader_read_int_t internal_function) {
+ }
+ 
+ Variant c_XMLReader::string_func_string_arg(String value, xmlreader_read_one_char_t internal_function) {
++  SYNC_VM_REGS_SCOPED();
+ 
+   if (value.empty()) {
+     raise_warning("Argument cannot be an empty string");
+@@ -299,6 +307,7 @@ Variant c_XMLReader::t_getattribute(const String& name) {
+ }
+ 
+ Variant c_XMLReader::t_getattributeno(int64_t index) {
++  SYNC_VM_REGS_SCOPED();
+   char *retchar = NULL;
+   if (m_ptr) {
+     retchar = (char *)xmlTextReaderGetAttributeNo(m_ptr, index);
+@@ -313,6 +322,7 @@ Variant c_XMLReader::t_getattributeno(int64_t index) {
+ }
+ 
+ Variant c_XMLReader::t_getattributens(const String& name, const String& namespaceURI) {
++  SYNC_VM_REGS_SCOPED();
+   if (name.empty() || namespaceURI.empty()) {
+     raise_warning("Attribute Name and Namespace URI cannot be empty");
+     return false;
+@@ -335,6 +345,7 @@ Variant c_XMLReader::t_getattributens(const String& name, const String& namespac
+ }
+ 
+ bool c_XMLReader::t_movetoattribute(const String& name) {
++  SYNC_VM_REGS_SCOPED();
+   if (name.empty()) {
+     raise_warning("Attribute Name is required");
+     return false;
+@@ -350,6 +361,7 @@ bool c_XMLReader::t_movetoattribute(const String& name) {
+ }
+ 
+ bool c_XMLReader::t_movetoattributeno(int64_t index) {
++  SYNC_VM_REGS_SCOPED();
+   if (m_ptr) {
+     int ret = xmlTextReaderMoveToAttributeNo(m_ptr, index);
+     if (ret == 1) {
+@@ -360,6 +372,7 @@ bool c_XMLReader::t_movetoattributeno(int64_t index) {
+ }
+ 
+ bool c_XMLReader::t_movetoattributens(const String& name, const String& namespaceURI) {
++  SYNC_VM_REGS_SCOPED();
+   if (name.empty() || namespaceURI.empty()) {
+     raise_warning("Attribute Name and Namespace URI cannot be empty");
+     return false;
+@@ -408,6 +421,7 @@ Variant c_XMLReader::t_lookupnamespace(const String& prefix) {
+ }
+ 
+ bool c_XMLReader::t_setschema(const String& source) {
++  SYNC_VM_REGS_SCOPED();
+   if (source.empty()) {
+     raise_warning("Schema data source is required");
+     return false;
+@@ -436,6 +450,7 @@ bool c_XMLReader::t_setparserproperty(int64_t property, bool value) {
+ }
+ 
+ bool c_XMLReader::set_relaxng_schema(String source, int type) {
++  SYNC_VM_REGS_SCOPED();
+   if (source.empty()) {
+     raise_warning("Schema data source is required");
+     return false;
+@@ -582,6 +597,7 @@ Variant c_XMLReader::t___get(Variant name) {
+ Variant c_XMLReader::t_expand(const Object& basenode /* = null */) {
+   p_DOMDocument doc;
+   xmlDocPtr docp = nullptr;
++  SYNC_VM_REGS_SCOPED();
+ 
+   if (!basenode.isNull()) {
+     c_DOMNode *dombasenode = basenode.getTyped<c_DOMNode>();
+diff --git a/hphp/runtime/ext/libxml/ext_libxml.cpp b/hphp/runtime/ext/libxml/ext_libxml.cpp
+index 277d8ec..5b54860 100644
+--- a/hphp/runtime/ext/libxml/ext_libxml.cpp
++++ b/hphp/runtime/ext/libxml/ext_libxml.cpp
+@@ -17,9 +17,13 @@
+ 
+ #include "hphp/runtime/ext/libxml/ext_libxml.h"
+ 
++#include "hphp/runtime/base/file-stream-wrapper.h"
++#include "hphp/runtime/base/file.h"
+ #include "hphp/runtime/base/request-event-handler.h"
+ #include "hphp/runtime/base/request-local.h"
++#include "hphp/runtime/base/stream-wrapper-registry.h"
+ #include "hphp/runtime/base/zend-url.h"
++#include "hphp/runtime/ext/ext_file.h"
+ 
+ #include <libxml/parserInternals.h>
+ #include <libxml/tree.h>
+@@ -31,10 +35,13 @@
+ #include <libxml/xmlschemas.h>
+ #endif
+ 
+-namespace HPHP {
++#include <memory>
++#include <cstring>
+ 
+-static xmlParserInputBufferPtr
+-libxml_input_buffer(const char *URI, xmlCharEncoding enc);
++TRACE_SET_MOD(libxml);
++
++namespace HPHP {
++///////////////////////////////////////////////////////////////////////////////
+ 
+ class xmlErrorVec : public std::vector<xmlError> {
+ public:
+@@ -44,13 +51,13 @@ class xmlErrorVec : public std::vector<xmlError> {
+ 
+   void reset() {
+     clearErrors();
+-    xmlErrorVec().swap(*this);
++    clear();
+   }
+ 
+ private:
+   void clearErrors() {
+-    for (int64_t i = 0; i < size(); i++) {
+-      xmlResetError(&at(i));
++    for (auto& error : *this) {
++      xmlResetError(&error);
+     }
+   }
+ };
+@@ -60,21 +67,24 @@ struct LibXmlRequestData final : RequestEventHandler {
+     m_use_error = false;
+     m_errors.reset();
+     m_entity_loader_disabled = false;
++    m_streams_context = uninit_null();
+   }
+ 
+   void requestShutdown() override {
+     m_use_error = false;
+     m_errors.reset();
++    m_streams_context = uninit_null();
+   }
+ 
+   bool m_entity_loader_disabled;
+   bool m_use_error;
+   xmlErrorVec m_errors;
++  Variant m_streams_context;
+ };
+ 
+ IMPLEMENT_STATIC_REQUEST_LOCAL(LibXmlRequestData, tl_libxml_request_data);
+ 
+-static Class * s_LibXMLError_class;
++static Class* s_LibXMLError_class;
+ 
+ const StaticString
+   s_LibXMLError("LibXMLError"),
+@@ -111,6 +121,185 @@ const StaticString
+   s_LIBXML_ERR_ERROR("LIBXML_ERR_ERROR"),
+   s_LIBXML_ERR_FATAL("LIBXML_ERR_FATAL");
+ 
++///////////////////////////////////////////////////////////////////////////////
++// Callbacks and helpers
++//
++// Note that these stream callbacks may re-enter the VM via a user-defined
++// stream wrapper. The VM state should be synced using VMRegAnchor by the
++// caller, before entering libxml2.
++
++static Resource libxml_streams_IO_open_wrapper(
++    const char *filename, const char* mode, bool read_only)
++{
++  ITRACE(1, "libxml_open_wrapper({}, {}, {})\n", filename, mode, read_only);
++  Trace::Indent _i;
++
++  String strFilename = StringData::Make(filename, CopyString);
++  /* FIXME: PHP calls stat() here if the wrapper has a non-null stat handler,
++   * in order to skip the open of a missing file, thus suppressing warnings.
++   * Our stat handlers are virtual, so there's no easy way to tell if stat
++   * is supported, so instead we will just call stat() for plain files, since
++   * of the default transports, only plain files have support for stat().
++   */
++  if (read_only) {
++    int pathIndex = 0;
++    Stream::Wrapper * wrapper = Stream::getWrapperFromURI(strFilename,
++                                                          &pathIndex);
++    if (dynamic_cast<FileStreamWrapper*>(wrapper)) {
++      if (!f_file_exists(strFilename)) {
++        return Resource();
++      }
++    }
++  }
++
++  // PHP unescapes the URI here, but that should properly be done by the
++  // wrapper.  The wrapper should expect a valid URI, e.g. file:///foo%20bar
++  return File::Open(strFilename, mode, 0,
++      tl_libxml_request_data->m_streams_context);
++}
++
++int libxml_streams_IO_read(void* context, char* buffer, int len) {
++  ITRACE(1, "libxml_IO_read({}, {}, {})\n", context, (void*)buffer, len);
++  Trace::Indent _i;
++
++  Resource stream(static_cast<ResourceData*>(context));
++  assert(len >= 0);
++  Variant ret = f_fread(stream, len);
++  if (ret.isString()) {
++    const String& str = ret.asCStrRef();
++    if (str.size() <= len) {
++      std::memcpy(buffer, str.data(), str.size());
++      return str.size();
++    }
++  }
++
++  return -1;
++}
++
++int libxml_streams_IO_write(void* context, const char* buffer, int len) {
++  ITRACE(1, "libxml_IO_write({}, {}, {})\n", context, (void*)buffer, len);
++  Trace::Indent _i;
++
++  Resource stream(static_cast<ResourceData*>(context));
++  String strBuffer(StringData::Make(buffer, len, CopyString));
++  Variant ret = f_fwrite(stream, strBuffer);
++  if (ret.isInteger() && ret.asInt64Val() < INT_MAX) {
++    return (int)ret.asInt64Val();
++  } else {
++    return -1;
++  }
++}
++
++int libxml_streams_IO_close(void* context) {
++  ITRACE(1, "libxml_IO_close({}), sweeping={}\n",
++         context, MemoryManager::sweeping());
++  Trace::Indent _i;
++
++  if (MemoryManager::sweeping()) {
++    // Stream wrappers close themselves on sweep, so there's nothing to do here
++    return 0;
++  }
++
++  Resource stream(static_cast<ResourceData*>(context));
++  // Release the reference owned by context. Guaranteed to not go to zero since
++  // we just created one belonging to stream.
++  stream.get()->decRefCount();
++
++  return f_fclose(stream) ? 0 : -1;
++}
++
++static xmlExternalEntityLoader s_default_entity_loader = nullptr;
++
++/*
++ * A whitelist of protocols allowed to be use in xml external entities. Note
++ * that accesses to this set are not synchronized, so it must not be modified
++ * after module initialization.
++ */
++static std::unordered_set<
++  const StringData*,
++  string_data_hash,
++  string_data_isame
++> s_ext_entity_whitelist;
++
++static bool allow_ext_entity_protocol(const String& protocol) {
++  return s_ext_entity_whitelist.count(protocol.get());
++}
++
++static xmlParserInputPtr libxml_ext_entity_loader(const char *url,
++                                                  const char *id,
++                                                  xmlParserCtxtPtr context) {
++  ITRACE(1, "libxml_ext_entity_loader({}, {}, {})\n",
++         url, id, (void*)context);
++  Trace::Indent _i;
++
++  auto protocol = Stream::getWrapperProtocol(url);
++  if (!allow_ext_entity_protocol(protocol)) {
++    raise_warning("Protocol '%s' for external XML entity '%s' is disabled for"
++                  " security reasons. This may be changed using the"
++                  " hhvm.libxml.ext_entity_whitelist ini setting.",
++                  protocol.c_str(), url);
++    return nullptr;
++  }
++
++  if (tl_libxml_request_data->m_entity_loader_disabled) return nullptr;
++
++  return s_default_entity_loader(url, id, context);
++}
++
++static xmlParserInputBufferPtr
++libxml_create_input_buffer(const char* URI, xmlCharEncoding enc) {
++  ITRACE(1, "libxml_create_input_buffer({}, {})\n", URI, static_cast<int>(enc));
++  Trace::Indent _i;
++
++  if (URI == nullptr) return nullptr;
++
++  Resource stream = libxml_streams_IO_open_wrapper(URI, "rb", true);
++  if (stream.isInvalid()) return nullptr;
++
++  // Allocate the Input buffer front-end.
++  xmlParserInputBufferPtr ret = xmlAllocParserInputBuffer(enc);
++  if (ret != nullptr) {
++    stream.get()->incRefCount();
++    ret->context = stream.get();
++    ret->readcallback = libxml_streams_IO_read;
++    ret->closecallback = libxml_streams_IO_close;
++  }
++
++  return ret;
++}
++
++static xmlOutputBufferPtr
++libxml_create_output_buffer(const char *URI,
++                            xmlCharEncodingHandlerPtr encoder,
++                            int compression ATTRIBUTE_UNUSED)
++{
++  ITRACE(1, "libxml_create_output_buffer({}, {}, {})\n",
++         URI, (void*)encoder, compression);
++  Trace::Indent _i;
++
++  if (URI == nullptr) {
++    return nullptr;
++  }
++  // PHP unescapes the URI here, but that should properly be done by the
++  // wrapper.  The wrapper should expect a valid URI, e.g. file:///foo%20bar
++  Resource stream = libxml_streams_IO_open_wrapper(URI, "wb", false);
++  if (stream.isInvalid()) {
++    return nullptr;
++  }
++  // Allocate the Output buffer front-end.
++  xmlOutputBufferPtr ret = xmlAllocOutputBuffer(encoder);
++  if (ret != nullptr) {
++    stream.get()->incRefCount();
++    ret->context = stream.get();
++    ret->writecallback = libxml_streams_IO_write;
++    ret->closecallback = libxml_streams_IO_close;
++  }
++
++  return ret;
++}
++
++///////////////////////////////////////////////////////////////////////////////
++
+ bool libxml_use_internal_error() {
+   return tl_libxml_request_data->m_use_error;
+ }
+@@ -325,14 +514,6 @@ bool HHVM_FUNCTION(libxml_use_internal_errors, bool use_errors) {
+   return ret;
+ }
+ 
+-static xmlParserInputBufferPtr
+-libxml_input_buffer(const char *URI, xmlCharEncoding enc) {
+-  if (tl_libxml_request_data->m_entity_loader_disabled) {
+-    return nullptr;
+-  }
+-  return __xmlParserInputBufferCreateFilename(URI, enc);
+-}
+-
+ bool HHVM_FUNCTION(libxml_disable_entity_loader, bool disable /* = true */) {
+   bool old = tl_libxml_request_data->m_entity_loader_disabled;
+ 
+@@ -341,6 +522,13 @@ bool HHVM_FUNCTION(libxml_disable_entity_loader, bool disable /* = true */) {
+   return old;
+ }
+ 
++void HHVM_FUNCTION(libxml_set_streams_context, const Resource & context) {
++  tl_libxml_request_data->m_streams_context = context;
++}
++
++///////////////////////////////////////////////////////////////////////////////
++// Extension
++
+ class LibXMLExtension : public Extension {
+   public:
+     LibXMLExtension() : Extension("libxml") {}
+@@ -356,6 +544,22 @@ class LibXMLExtension : public Extension {
+           name.get(), StaticString(value).get());
+     }
+ 
++    void moduleLoad(const IniSetting::Map& ini, Hdf config) override {
++      Hdf libxml = config["Eval"]["Libxml"];
++
++      // Grab the external entity whitelist and set up the map, then register
++      // the callback for external entity loading. data: is always supported
++      // since it doesn't reference data outside of the current document.
++      std::vector<std::string> whitelist;
++      auto whitelistStr = Config::GetString(ini, libxml["ExtEntityWhitelist"]);
++      folly::split(',', whitelistStr, whitelist, true);
++
++      s_ext_entity_whitelist.insert(makeStaticString("data"));
++      for (auto const& str : whitelist) {
++        s_ext_entity_whitelist.insert(makeStaticString(str));
++      }
++    }
++
+     void moduleInit() override {
+       cnsInt(s_LIBXML_VERSION, LIBXML_VERSION);
+       cnsStr(s_LIBXML_DOTTED_VERSION, LIBXML_DOTTED_VERSION);
+@@ -404,11 +608,18 @@ class LibXMLExtension : public Extension {
+       HHVM_FE(libxml_clear_errors);
+       HHVM_FE(libxml_use_internal_errors);
+       HHVM_FE(libxml_disable_entity_loader);
++      HHVM_FE(libxml_set_streams_context);
+ 
+       loadSystemlib();
+ 
+       s_LibXMLError_class = Unit::lookupClass(s_LibXMLError.get());
+-      xmlParserInputBufferCreateFilenameDefault(libxml_input_buffer);
++
++      // Set up callbacks to support stream wrappers for reading and writing
++      // xml files and loading external entities.
++      xmlParserInputBufferCreateFilenameDefault(libxml_create_input_buffer);
++      xmlOutputBufferCreateFilenameDefault(libxml_create_output_buffer);
++      s_default_entity_loader = xmlGetExternalEntityLoader();
++      xmlSetExternalEntityLoader(libxml_ext_entity_loader);
+     }
+ 
+     void requestInit() override {
+diff --git a/hphp/runtime/ext/libxml/ext_libxml.h b/hphp/runtime/ext/libxml/ext_libxml.h
+index a19231d..7634b02 100644
+--- a/hphp/runtime/ext/libxml/ext_libxml.h
++++ b/hphp/runtime/ext/libxml/ext_libxml.h
+@@ -19,6 +19,7 @@
+ #define incl_HPHP_EXT_LIBXML_H_
+ 
+ #include "hphp/runtime/base/base-includes.h"
++
+ #include <libxml/parser.h>
+ 
+ namespace HPHP {
+@@ -29,6 +30,9 @@ void libxml_add_error(const std::string& msg);
+ String libxml_get_valid_file_path(const String& source);
+ String libxml_get_valid_file_path(const char* source);
+ 
++int libxml_streams_IO_read(void* context, char* buffer, int len);
++int libxml_streams_IO_write(void* context, const char* buffer, int len);
++int libxml_streams_IO_close(void* context);
+ 
+ void php_libxml_node_free(xmlNodePtr node);
+ void php_libxml_node_free_resource(xmlNodePtr node);
+diff --git a/hphp/runtime/ext/libxml/ext_libxml.php b/hphp/runtime/ext/libxml/ext_libxml.php
+index 9e54afa..eb3cec7 100644
+--- a/hphp/runtime/ext/libxml/ext_libxml.php
++++ b/hphp/runtime/ext/libxml/ext_libxml.php
+@@ -30,3 +30,7 @@ function libxml_use_internal_errors(bool $use_errors = false): bool;
+ /* Disable/enable the ability to load external entities. */
+ <<__Native>>
+ function libxml_disable_entity_loader(bool $disable = true): bool;
++
++/* Set the streams context for the next libxml document load or write */
++<<__Native>>
++function libxml_set_streams_context(resource $context): void;
+diff --git a/hphp/runtime/ext/stream/ext_stream.cpp b/hphp/runtime/ext/stream/ext_stream.cpp
+index 7c422c0..af0ae58 100644
+--- a/hphp/runtime/ext/stream/ext_stream.cpp
++++ b/hphp/runtime/ext/stream/ext_stream.cpp
+@@ -58,7 +58,9 @@ static StreamContext* get_stream_context(const Variant& stream_or_context);
+ Variant f_stream_context_create(const Array& options /* = null_array */,
+                                 const Array& params /* = null_array */) {
+   if (!options.isNull() && !StreamContext::validateOptions(options)) {
+-    return false;
++    raise_warning("options should have the form "
++                  "[\"wrappername\"][\"optionname\"] = $value");
++    return Resource(NEWOBJ(StreamContext)(HPHP::null_array, HPHP::null_array));
+   }
+   return Resource(NEWOBJ(StreamContext)(options, params));
+ }
+diff --git a/hphp/runtime/ext/xsl/ext_xsl.cpp b/hphp/runtime/ext/xsl/ext_xsl.cpp
+index 1061fb0..4218ab6 100644
+--- a/hphp/runtime/ext/xsl/ext_xsl.cpp
++++ b/hphp/runtime/ext/xsl/ext_xsl.cpp
+@@ -469,6 +469,7 @@ static void HHVM_METHOD(XSLTProcessor, importStylesheet,
+   if (doc) {
+     data->m_stylesheet = xsltParseStylesheetDoc(doc);
+     if (data->m_stylesheet == nullptr) {
++      xmlFreeDoc(doc);
+       raise_error("Unable to import stylesheet");
+     }
+   }
+diff --git a/hphp/test/quick/xml_entity_loader.php b/hphp/test/quick/xml_entity_loader.php
+new file mode 100644
+index 0000000..b95592e
+--- /dev/null
++++ b/hphp/test/quick/xml_entity_loader.php
+@@ -0,0 +1,15 @@
++<?php
++
++$doc = new DOMDocument();
++$doc->loadXML(
++'<?xml version="1.0" encoding="UTF-8" ?>
++<!DOCTYPE root [
++    <!ENTITY test SYSTEM "data:text/plain;base64,aGVsbG8gd29ybGQ=">
++]>
++<root>&test;</root>',
++LIBXML_DTDLOAD | LIBXML_NOENT
++);
++
++var_dump($doc->textContent);
++
++?>
+diff --git a/hphp/test/quick/xml_entity_loader.php.expect b/hphp/test/quick/xml_entity_loader.php.expect
+new file mode 100644
+index 0000000..d4a0bb6
+--- /dev/null
++++ b/hphp/test/quick/xml_entity_loader.php.expect
+@@ -0,0 +1 @@
++string(11) "hello world"
+diff --git a/hphp/test/slow/dom_document/xinclude.php.ini b/hphp/test/slow/dom_document/xinclude.php.ini
+new file mode 100644
+index 0000000..be9eec1
+--- /dev/null
++++ b/hphp/test/slow/dom_document/xinclude.php.ini
+@@ -0,0 +1 @@
++hhvm.libxml.ext_entity_whitelist = "file"
+diff --git a/hphp/test/tools/import_zend_test.py b/hphp/test/tools/import_zend_test.py
+index 8af016b..50233ce 100755
+--- a/hphp/test/tools/import_zend_test.py
++++ b/hphp/test/tools/import_zend_test.py
+@@ -181,7 +181,6 @@
+     '/ext/xsl/tests/bug49634.php',
+     '/ext/xsl/tests/bug54446_with_ini.php',
+     '/ext/xsl/tests/xsl-phpinfo.php',
+-    '/ext/xsl/tests/xslt008.php',
+     '/ext/xsl/tests/xslt009.php',
+     '/ext/xsl/tests/xsltprocessor_getParameter-wrongparam.php',
+     '/ext/xsl/tests/xsltprocessor_removeParameter-wrongparams.php',
+diff --git a/hphp/test/zend/bad/ext/libxml/tests/004.php b/hphp/test/zend/bad/ext/libxml/tests/004.php
+deleted file mode 100644
+index beb04b9..0000000
+--- a/hphp/test/zend/bad/ext/libxml/tests/004.php
++++ /dev/null
+@@ -1,23 +0,0 @@
+-<?php
+-
+-$ctxs = array(
+-	NULL,
+-	'bogus',
+-	123,
+-	new stdclass,
+-	array('a'),
+-	stream_context_create(),
+-	stream_context_create(array('file')),
+-	stream_context_create(array('file' => array('some_opt' => 'aaa')))
+-);
+-
+-
+-foreach ($ctxs as $ctx) {
+-	var_dump(libxml_set_streams_context($ctx));
+-	$dom = new DOMDocument();
+-	var_dump($dom->load(dirname(__FILE__).'/test.xml'));
+-}
+-
+-echo "Done\n";
+-
+-?>
+\ No newline at end of file
+diff --git a/hphp/test/zend/bad/ext/libxml/tests/004.php.expectf b/hphp/test/zend/bad/ext/libxml/tests/004.php.expectf
+deleted file mode 100644
+index 93e3a98..0000000
+--- a/hphp/test/zend/bad/ext/libxml/tests/004.php.expectf
++++ /dev/null
+@@ -1,29 +0,0 @@
+-
+-Warning: %s
+-
+-Warning: %s
+-NULL
+-bool(true)
+-
+-Warning: %s
+-NULL
+-bool(true)
+-
+-Warning: %s
+-NULL
+-bool(true)
+-
+-Warning: %s
+-NULL
+-bool(true)
+-
+-Warning: %s
+-NULL
+-bool(true)
+-NULL
+-bool(true)
+-NULL
+-bool(true)
+-NULL
+-bool(true)
+-Done
+\ No newline at end of file
+diff --git a/hphp/test/zend/bad/ext/libxml/tests/bug63389.php b/hphp/test/zend/bad/ext/libxml/tests/bug63389.php
+deleted file mode 100644
+index 0652e12..0000000
+--- a/hphp/test/zend/bad/ext/libxml/tests/bug63389.php
++++ /dev/null
+@@ -1,6 +0,0 @@
+-<?php
+-$fp = fopen("php://input", "r");
+-libxml_set_streams_context($fp);
+-libxml_set_streams_context("a");
+-echo "okey";
+-?>
+\ No newline at end of file
+diff --git a/hphp/test/zend/bad/ext/libxml/tests/bug63389.php.expectf b/hphp/test/zend/bad/ext/libxml/tests/bug63389.php.expectf
+deleted file mode 100644
+index 2e6f303..0000000
+--- a/hphp/test/zend/bad/ext/libxml/tests/bug63389.php.expectf
++++ /dev/null
+@@ -1,3 +0,0 @@
+-
+-Warning: %s
+-okey
+\ No newline at end of file
+diff --git a/hphp/test/zend/bad/ext/xsl/tests/xslt008.php b/hphp/test/zend/bad/ext/xsl/tests/xslt008.php
+deleted file mode 100644
+index e3a33d5..0000000
+--- a/hphp/test/zend/bad/ext/xsl/tests/xslt008.php
++++ /dev/null
+@@ -1,14 +0,0 @@
+-<?php
+-echo "Test 8: Stream Wrapper Includes ";
+-include("prepare.inc");
+-$xsl = new domDocument;
+-$xsl->load(dirname(__FILE__)."/streamsinclude.xsl");
+-if(!$xsl) {
+-  echo "Error while parsing the document\n";
+-  exit;
+-}
+-chdir(dirname(__FILE__));
+-$proc->importStylesheet($xsl);
+-print "\n";
+-print $proc->transformToXML($dom);
+-
+diff --git a/hphp/test/zend/bad/ext/xsl/tests/xslt008.php.expectf b/hphp/test/zend/bad/ext/xsl/tests/xslt008.php.expectf
+deleted file mode 100644
+index 44d3a54..0000000
+--- a/hphp/test/zend/bad/ext/xsl/tests/xslt008.php.expectf
++++ /dev/null
+@@ -1,7 +0,0 @@
+-Test 8: Stream Wrapper Includes 
+-<?xml version="1.0" encoding="iso-8859-1"?>
+-<html><body>bar
+-a1 b1 c1 <br/> 
+-a2 c2 <br/> 
+-ä3 b3 c3 <br/> 
+-</body></html>
+\ No newline at end of file
+diff --git a/hphp/test/zend/bad/ext/xsl/tests/xslt008.php.skipif b/hphp/test/zend/bad/ext/xsl/tests/xslt008.php.skipif
+deleted file mode 100644
+index 40e4048..0000000
+--- a/hphp/test/zend/bad/ext/xsl/tests/xslt008.php.skipif
++++ /dev/null
+@@ -1,4 +0,0 @@
+-<?php
+-	require_once dirname(__FILE__) .'/skipif.inc';
+-	if (!extension_loaded('zlib')) die('skip zlib extension not available');
+-?>
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/libxml/tests/004.php b/hphp/test/zend/good/ext/libxml/tests/004.php
+new file mode 100644
+index 0000000..beb04b9
+--- /dev/null
++++ b/hphp/test/zend/good/ext/libxml/tests/004.php
+@@ -0,0 +1,23 @@
++<?php
++
++$ctxs = array(
++	NULL,
++	'bogus',
++	123,
++	new stdclass,
++	array('a'),
++	stream_context_create(),
++	stream_context_create(array('file')),
++	stream_context_create(array('file' => array('some_opt' => 'aaa')))
++);
++
++
++foreach ($ctxs as $ctx) {
++	var_dump(libxml_set_streams_context($ctx));
++	$dom = new DOMDocument();
++	var_dump($dom->load(dirname(__FILE__).'/test.xml'));
++}
++
++echo "Done\n";
++
++?>
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/libxml/tests/004.php.expectf b/hphp/test/zend/good/ext/libxml/tests/004.php.expectf
+new file mode 100644
+index 0000000..93e3a98
+--- /dev/null
++++ b/hphp/test/zend/good/ext/libxml/tests/004.php.expectf
+@@ -0,0 +1,29 @@
++
++Warning: %s
++
++Warning: %s
++NULL
++bool(true)
++
++Warning: %s
++NULL
++bool(true)
++
++Warning: %s
++NULL
++bool(true)
++
++Warning: %s
++NULL
++bool(true)
++
++Warning: %s
++NULL
++bool(true)
++NULL
++bool(true)
++NULL
++bool(true)
++NULL
++bool(true)
++Done
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/libxml/tests/bug63389.php b/hphp/test/zend/good/ext/libxml/tests/bug63389.php
+new file mode 100644
+index 0000000..0652e12
+--- /dev/null
++++ b/hphp/test/zend/good/ext/libxml/tests/bug63389.php
+@@ -0,0 +1,6 @@
++<?php
++$fp = fopen("php://input", "r");
++libxml_set_streams_context($fp);
++libxml_set_streams_context("a");
++echo "okey";
++?>
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/libxml/tests/bug63389.php.expectf b/hphp/test/zend/good/ext/libxml/tests/bug63389.php.expectf
+new file mode 100644
+index 0000000..2e6f303
+--- /dev/null
++++ b/hphp/test/zend/good/ext/libxml/tests/bug63389.php.expectf
+@@ -0,0 +1,3 @@
++
++Warning: %s
++okey
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/libxml/tests/test.xml b/hphp/test/zend/good/ext/libxml/tests/test.xml
+new file mode 100644
+index 0000000..fc1d328
+--- /dev/null
++++ b/hphp/test/zend/good/ext/libxml/tests/test.xml
+@@ -0,0 +1,8 @@
++<library>
++	<book>
++		<title>PHP made simple</title>
++	</book>
++	<book>
++		<title>learn PHP easily</title>
++	</book>
++</library>
+diff --git a/hphp/test/zend/good/ext/xsl/tests/bug53965.php b/hphp/test/zend/good/ext/xsl/tests/bug53965.php
+new file mode 100644
+index 0000000..2450b3c
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/bug53965.php
+@@ -0,0 +1,15 @@
++<?php
++
++$base = 'file://' . dirname(__FILE__) . DIRECTORY_SEPARATOR . '53965';
++
++$xml = new DOMDocument();
++$xml->load($base . DIRECTORY_SEPARATOR . 'collection.xml');
++
++$xsl = new DOMDocument();
++$xsl->load($base . DIRECTORY_SEPARATOR . 'collection.xsl');
++
++$proc = new XSLTProcessor;
++$proc->importStyleSheet($xsl);
++
++echo $proc->transformToXML($xml);
++?>
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/xsl/tests/bug53965.php.expectf b/hphp/test/zend/good/ext/xsl/tests/bug53965.php.expectf
+new file mode 100644
+index 0000000..01153ed
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/bug53965.php.expectf
+@@ -0,0 +1,4 @@
++Hey! Welcome to Nicolas Eliaszewicz's sweet CD collection! 
++  
++ <h1>Fight for your mind</h1><h2>by Ben Harper - 1995</h2><hr>
++ <h1>Electric Ladyland</h1><h2>by Jimi Hendrix - 1997</h2><hr>
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/xsl/tests/bug53965.php.ini b/hphp/test/zend/good/ext/xsl/tests/bug53965.php.ini
+new file mode 100644
+index 0000000..be9eec1
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/bug53965.php.ini
+@@ -0,0 +1 @@
++hhvm.libxml.ext_entity_whitelist = "file"
+diff --git a/hphp/test/zend/good/ext/xsl/tests/bug53965.php.skipif b/hphp/test/zend/good/ext/xsl/tests/bug53965.php.skipif
+new file mode 100644
+index 0000000..6e87d2c
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/bug53965.php.skipif
+@@ -0,0 +1,3 @@
++<?php
++if (!extension_loaded('xsl')) die("skip Extension XSL is required\n");
++?>
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php b/hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php
+new file mode 100644
+index 0000000..e3a33d5
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php
+@@ -0,0 +1,14 @@
++<?php
++echo "Test 8: Stream Wrapper Includes ";
++include("prepare.inc");
++$xsl = new domDocument;
++$xsl->load(dirname(__FILE__)."/streamsinclude.xsl");
++if(!$xsl) {
++  echo "Error while parsing the document\n";
++  exit;
++}
++chdir(dirname(__FILE__));
++$proc->importStylesheet($xsl);
++print "\n";
++print $proc->transformToXML($dom);
++
+diff --git a/hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php.expectf b/hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php.expectf
+new file mode 100644
+index 0000000..ef7bff2
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/xslt008-disabled.php.expectf
+@@ -0,0 +1,8 @@
++Test 8: Stream Wrapper Includes 
++Warning: Protocol 'compress.zlib' for external XML entity 'compress.zlib://xslt.xsl.gz' is disabled for security reasons. This may be changed using the hhvm.libxml.ext_entity_whitelist ini setting. in %s/tests/xslt008-disabled.php on line 11
++
++Warning: compilation error: file %s/streamsinclude.xsl line 5 element include in %s/xslt008-disabled.php on line 11
++
++Warning: xsl:include : unable to load compress.zlib://xslt.xsl.gz in %s/xslt008-disabled.php on line 11
++
++Fatal error: Unable to import stylesheet in %s/xslt008-disabled.php on line 11
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/xsl/tests/xslt008.php b/hphp/test/zend/good/ext/xsl/tests/xslt008.php
+new file mode 100644
+index 0000000..e3a33d5
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/xslt008.php
+@@ -0,0 +1,14 @@
++<?php
++echo "Test 8: Stream Wrapper Includes ";
++include("prepare.inc");
++$xsl = new domDocument;
++$xsl->load(dirname(__FILE__)."/streamsinclude.xsl");
++if(!$xsl) {
++  echo "Error while parsing the document\n";
++  exit;
++}
++chdir(dirname(__FILE__));
++$proc->importStylesheet($xsl);
++print "\n";
++print $proc->transformToXML($dom);
++
+diff --git a/hphp/test/zend/good/ext/xsl/tests/xslt008.php.expectf b/hphp/test/zend/good/ext/xsl/tests/xslt008.php.expectf
+new file mode 100644
+index 0000000..44d3a54
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/xslt008.php.expectf
+@@ -0,0 +1,7 @@
++Test 8: Stream Wrapper Includes 
++<?xml version="1.0" encoding="iso-8859-1"?>
++<html><body>bar
++a1 b1 c1 <br/> 
++a2 c2 <br/> 
++ä3 b3 c3 <br/> 
++</body></html>
+\ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/xsl/tests/xslt008.php.ini b/hphp/test/zend/good/ext/xsl/tests/xslt008.php.ini
+new file mode 100644
+index 0000000..661e5c1
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/xslt008.php.ini
+@@ -0,0 +1 @@
++hhvm.libxml.ext_entity_whitelist = "compress.zlib"
+diff --git a/hphp/test/zend/good/ext/xsl/tests/xslt008.php.norepo b/hphp/test/zend/good/ext/xsl/tests/xslt008.php.norepo
+new file mode 100644
+index 0000000..e69de29
+diff --git a/hphp/test/zend/good/ext/xsl/tests/xslt008.php.skipif b/hphp/test/zend/good/ext/xsl/tests/xslt008.php.skipif
+new file mode 100644
+index 0000000..40e4048
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xsl/tests/xslt008.php.skipif
+@@ -0,0 +1,4 @@
++<?php
++	require_once dirname(__FILE__) .'/skipif.inc';
++	if (!extension_loaded('zlib')) die('skip zlib extension not available');
++?>
+\ No newline at end of file
+diff --git a/hphp/util/trace.h b/hphp/util/trace.h
+index ed29bef..a14b4be 100644
+--- a/hphp/util/trace.h
++++ b/hphp/util/trace.h
+@@ -35,7 +35,7 @@
+  * env TRACE=mcg:1,bcinterp:3,tmp0:1 ./hhvm/hhvm ...
+  *
+  * In a source file, select the compilation unit's module by calling the
+- * TRACE_SET_MODE macro. E.g.,
++ * TRACE_SET_MOD macro. E.g.,
+  *
+  *   TRACE_SET_MOD(mcg);
+  *
+@@ -118,6 +118,7 @@ namespace Trace {
+       TM(intercept)     \
+       TM(interpOne)     \
+       TM(jittime)       \
++      TM(libxml)        \
+       TM(mcg)           \
+       TM(mcgstats)      \
+       TM(minstr)        \
+-- 
+1.9.3
+

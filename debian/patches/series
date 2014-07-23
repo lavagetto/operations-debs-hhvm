@@ -8,6 +8,5 @@ typos
 public_headers_system
 
 # Wikimedia-specific patches
-Fix-boundary-cases-of-strspn-strcspn-and-substr_repl.patch
-Support-stream-wrappers-in-XML-parser-extensions.patch
-Allow-MixedArray-MakeReserveLike-to-work-on-arrays-w.patch
+Support-stream-wrappers-in-XML-parser-extensions-add-external-entity-loader.patch
+EZC-fix-crash-due-to-EG-being-transmitted-between-requests.patch
