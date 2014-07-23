@@ -16,79 +16,80 @@
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/vtune-jit.h"
 
-#include "folly/MapUtil.h"
-
 #include <cinttypes>
-#include <stdint.h>
 #include <assert.h>
-#include <unistd.h>
-#include <sys/mman.h>
-#include <strstream>
-#include <stdio.h>
 #include <stdarg.h>
-#include <string>
-#include <queue>
+#include <stdint.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <unwind.h>
-#include <unordered_set>
 
 #include <algorithm>
 #include <exception>
 #include <memory>
+#include <queue>
+#include <string>
+#include <strstream>
+#include <unordered_set>
 #include <vector>
 
 #include "folly/Format.h"
+#include "folly/MapUtil.h"
 #include "folly/String.h"
 
 #include "hphp/util/abi-cxx.h"
-#include "hphp/util/disasm.h"
 #include "hphp/util/bitops.h"
+#include "hphp/util/cycles.h"
 #include "hphp/util/debug.h"
+#include "hphp/util/disasm.h"
 #include "hphp/util/maphuge.h"
+#include "hphp/util/meta.h"
+#include "hphp/util/process.h"
 #include "hphp/util/rank.h"
+#include "hphp/util/repo-schema.h"
 #include "hphp/util/ringbuffer.h"
 #include "hphp/util/timer.h"
 #include "hphp/util/trace.h"
-#include "hphp/util/meta.h"
-#include "hphp/util/process.h"
-#include "hphp/util/repo-schema.h"
-#include "hphp/util/cycles.h"
 
-#include "hphp/runtime/vm/bytecode.h"
-#include "hphp/runtime/vm/php-debug.h"
-#include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-option-guard.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/strings.h"
-#include "hphp/runtime/server/source-root-info.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/ext/ext_closure.h"
-#include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/runtime/ext/ext_function.h"
+#include "hphp/runtime/ext/ext_generator.h"
+#include "hphp/runtime/server/source-root-info.h"
+#include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/debug/debug.h"
-#include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/vm/srckey.h"
-#include "hphp/runtime/vm/treadmill.h"
-#include "hphp/runtime/vm/repo.h"
-#include "hphp/runtime/vm/type-profile.h"
-#include "hphp/runtime/vm/member-operations.h"
+#include "hphp/runtime/vm/jit/back-end-x64.h" // XXX Layering violation.
 #include "hphp/runtime/vm/jit/check.h"
+#include "hphp/runtime/vm/jit/code-gen.h"
+#include "hphp/runtime/vm/jit/debug-guards.h"
 #include "hphp/runtime/vm/jit/hhbc-translator.h"
+#include "hphp/runtime/vm/jit/inlining-decider.h"
 #include "hphp/runtime/vm/jit/ir-translator.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/opt.h"
 #include "hphp/runtime/vm/jit/print.h"
+#include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
-#include "hphp/runtime/vm/jit/srcdb.h"
-#include "hphp/runtime/base/rds.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/code-gen.h"
 #include "hphp/runtime/vm/jit/service-requests-inline.h"
-#include "hphp/runtime/vm/jit/back-end-x64.h" // XXX Layering violation.
-#include "hphp/runtime/vm/jit/debug-guards.h"
+#include "hphp/runtime/vm/jit/srcdb.h"
 #include "hphp/runtime/vm/jit/timer.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/member-operations.h"
+#include "hphp/runtime/vm/php-debug.h"
+#include "hphp/runtime/vm/repo.h"
+#include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/vm/srckey.h"
+#include "hphp/runtime/vm/treadmill.h"
+#include "hphp/runtime/vm/type-profile.h"
 #include "hphp/runtime/vm/unwind.h"
 
 #include "hphp/runtime/vm/jit/mc-generator-internal.h"
@@ -483,21 +484,6 @@ MCGenerator::smashPrologueGuards(TCA* prologues, int numPrologues,
   for (int i = 0; i < numPrologues; i++) {
     if (prologues[i] != m_tx.uniqueStubs.fcallHelperThunk
         && backEnd().funcPrologueHasGuard(prologues[i], func)) {
-      if (debug) {
-        /*
-         * Unit's are sometimes created racily, in which case all
-         * but the first are destroyed immediately. In that case,
-         * the Funcs of the destroyed Units never need their
-         * prologues smashing, and it would be a lock rank violation
-         * to take the write lease here.
-         * In all other cases, Funcs are destroyed via a delayed path
-         * (treadmill) and the rank violation isn't an issue.
-         */
-        if (!writer) {
-          writer.reset(new LeaseHolder(Translator::WriteLease(),
-                       LeaseAcquire::BLOCKING));
-        }
-      }
       mcg->backEnd().funcPrologueSmashGuard(prologues[i], func);
     }
   }
@@ -628,7 +614,7 @@ MCGenerator::getFuncPrologue(Func* func, int nPassed, ActRec* ar,
     auto ret = backEnd().emitFuncPrologue(code.main(), code.cold(), func,
                                           funcIsMagic, nPassed,
                                           start, aStart);
-    m_fixups.process();
+    m_fixups.process(nullptr);
     return ret;
   }();
 
@@ -657,7 +643,7 @@ MCGenerator::getFuncPrologue(Func* func, int nPassed, ActRec* ar,
   recordGdbTranslation(skFuncBody, func,
                        code.main(), aStart,
                        false, true);
-  recordBCInstr(OpFuncPrologue, code.main(), start, false);
+  recordBCInstr(OpFuncPrologue, aStart, code.main().frontier(), false);
 
   return start;
 }
@@ -1422,60 +1408,25 @@ MCGenerator::syncWork() {
   Stats::inc(Stats::TC_Sync);
 }
 
-TCA
-MCGenerator::emitNativeTrampoline(TCA helperAddr) {
-  auto& trampolines = code.trampolines();
-  if (!trampolines.canEmit(kExpectedPerTrampolineSize)) {
-    // not enough space to emit a trampoline, so just return the
-    // helper address and emitCall will the emit the right sequence
-    // to call it indirectly
-    TRACE(1, "Ran out of space to emit a trampoline for %p\n", helperAddr);
-    return helperAddr;
+// Get the address of the literal val in the global data section.
+// If it's not there, add it to the map in m_fixups, which will
+// be committed to m_literals when m_fixups.process() is called.
+const uint64_t*
+MCGenerator::allocLiteral(uint64_t val) {
+  auto it = m_literals.find(val);
+  if (it != m_literals.end()) {
+    assert(*it->second == val);
+    return it->second;
   }
-
-  uint32_t index = m_numNativeTrampolines++;
-  TCA trampAddr = trampolines.frontier();
-  if (Stats::enabled()) {
-    emitIncStat(trampolines, &Stats::tl_helper_counters[0], index);
-    auto name = getNativeFunctionName(helperAddr);
-    const size_t limit = 50;
-    if (name.size() > limit) {
-      name[limit] = '\0';
-    }
-
-    // The duped string lives until process death intentionally.
-    Stats::helperNames[index].store(strdup(name.c_str()),
-                                    std::memory_order_release);
+  auto& pending = m_fixups.m_literals;
+  it = pending.find(val);
+  if (it != pending.end()) {
+    assert(*it->second == val);
+    return it->second;
   }
-
-  Asm a { trampolines };
-  // Move the 64-bit immediate address to rax, then jmp. If clobbering
-  // rax is a problem, we could do an rip-relative call with the address
-  // stored in the data section with no extra registers; but it has
-  // worse memory locality.
-  a.    emitImmReg(helperAddr, rax);
-  a.    jmp    (rax);
-  a.    ud2(); // hint that the jump doesn't go here.
-
-  m_trampolineMap[helperAddr] = trampAddr;
-  recordBCInstr(OpNativeTrampoline, trampolines, trampAddr, false);
-  if (RuntimeOption::EvalJitUseVtuneAPI) {
-    reportTrampolineToVtune(trampAddr, trampolines.frontier() - trampAddr);
-  }
-
-  return trampAddr;
-}
-
-TCA
-MCGenerator::getNativeTrampoline(TCA helperAddr) {
-  if (!RuntimeOption::EvalJitTrampolines && !Stats::enabled()) {
-    return helperAddr;
-  }
-  auto const trampAddr = (TCA)folly::get_default(m_trampolineMap, helperAddr);
-  if (trampAddr) {
-    return trampAddr;
-  }
-  return emitNativeTrampoline(helperAddr);
+  auto addr = allocData<uint64_t>(sizeof(uint64_t), 1);
+  *addr = val;
+  return pending[val] = addr;
 }
 
 bool
@@ -1522,7 +1473,7 @@ MCGenerator::recordSyncPoint(CodeAddress frontier, Offset pcOff, Offset spOff) {
 }
 
 void
-CodeGenFixups::process() {
+CodeGenFixups::process(GrowableVector<IncomingBranch>* inProgressTailBranches) {
   for (uint i = 0; i < m_pendingFixups.size(); i++) {
     TCA tca = m_pendingFixups[i].m_tca;
     assert(mcg->isValidCodeAddress(tca));
@@ -1539,6 +1490,10 @@ CodeGenFixups::process() {
     mcg->getJmpToTransIDMap().insert(elm);
   }
   m_pendingJmpTransIDs.clear();
+
+  mcg->literals().insert(m_literals.begin(), m_literals.end());
+  m_literals.clear();
+
   /*
    * Currently these are only used by the relocator,
    * so there's nothing left to do here.
@@ -1551,6 +1506,12 @@ CodeGenFixups::process() {
   m_codePointers.clear();
   m_bcMap.clear();
   m_alignFixups.clear();
+
+  if (inProgressTailBranches) {
+    m_inProgressTailJumps.swap(*inProgressTailBranches);
+  }
+  assert(m_inProgressTailJumps.empty());
+  assert(empty());
 }
 
 void CodeGenFixups::clear() {
@@ -1562,6 +1523,8 @@ void CodeGenFixups::clear() {
   m_codePointers.clear();
   m_bcMap.clear();
   m_alignFixups.clear();
+  m_inProgressTailJumps.clear();
+  m_literals.clear();
 }
 
 bool CodeGenFixups::empty() const {
@@ -1573,7 +1536,9 @@ bool CodeGenFixups::empty() const {
     m_addressImmediates.empty() &&
     m_codePointers.empty() &&
     m_bcMap.empty() &&
-    m_alignFixups.empty();
+    m_alignFixups.empty() &&
+    m_inProgressTailJumps.empty() &&
+    m_literals.empty();
 }
 
 void
@@ -1602,14 +1567,12 @@ MCGenerator::translateWork(const TranslArgs& args) {
     undoAfrozen.undo();
     undoGlobalData.undo();
     m_fixups.clear();
-    srcRec.clearInProgressTailJumps();
   };
 
   auto assertCleanState = [&] {
     assert(code.main().frontier() == start);
     assert(code.frozen().frontier() == frozenStart);
     assert(m_fixups.empty());
-    assert(srcRec.inProgressTailJumps().empty());
   };
 
   PostConditions pconds;
@@ -1677,7 +1640,7 @@ MCGenerator::translateWork(const TranslArgs& args) {
         }
 
         FTRACE(2, "translateRegion finished with result {}\n",
-               Translator::translateResultName(result));
+               Translator::ResultName(result));
       } catch (ControlFlowFailedExc& cfe) {
         FTRACE(2, "translateRegion with control flow failed: '{}'\n",
                cfe.what());
@@ -1743,6 +1706,23 @@ MCGenerator::translateWork(const TranslArgs& args) {
     // Fall through.
   }
 
+  if (RuntimeOption::EvalProfileBC) {
+    auto* unit = sk.unit();
+    TransBCMapping prev{};
+    for (auto& cur : m_fixups.m_bcMap) {
+      if (!cur.aStart) continue;
+      if (prev.aStart) {
+        if (prev.bcStart < unit->bclen()) {
+          recordBCInstr(unit->entry()[prev.bcStart],
+                        prev.aStart, cur.aStart, false);
+        }
+      } else {
+        recordBCInstr(OpTraceletGuard, start, cur.aStart, false);
+      }
+      prev = cur;
+    }
+  }
+
   recordGdbTranslation(sk, sk.func(), code.main(), start,
                        false, false);
   recordGdbTranslation(sk, sk.func(), code.cold(), coldStart,
@@ -1766,14 +1746,16 @@ MCGenerator::translateWork(const TranslArgs& args) {
     reportTraceletToVtune(sk.unit(), sk.func(), tr);
   }
 
-  m_fixups.process();
+  GrowableVector<IncomingBranch> inProgressTailBranches;
+  m_fixups.process(&inProgressTailBranches);
 
   // SrcRec::newTranslation() makes this code reachable. Do this last;
   // otherwise there's some chance of hitting in the reader threads whose
   // metadata is not yet visible.
   TRACE(1, "newTranslation: %p  sk: (func %d, bcOff %d)\n",
         start, sk.getFuncId(), sk.offset());
-  srcRec.newTranslation(start);
+  srcRec.newTranslation(start, inProgressTailBranches);
+
   TRACE(1, "mcg: %zd-byte tracelet\n", code.main().frontier() - start);
   if (Trace::moduleEnabledRelease(Trace::tcspace, 1)) {
     Trace::traceRelease("%s", getUsage().c_str());
@@ -1801,18 +1783,14 @@ void MCGenerator::traceCodeGen() {
     unit.collectPostConditions();
   }
 
-  auto regs = allocateRegs(unit);
-  assert(checkRegisters(unit, regs)); // calls checkCfg internally.
-
-  recordBCInstr(OpTraceletGuard, code.main(), code.main().frontier(), false);
-  genCode(unit, this, regs);
+  always_assert(this == mcg);
+  genCode(unit);
 
   m_numHHIRTrans++;
 }
 
 MCGenerator::MCGenerator()
   : m_backEnd(newBackEnd())
-  , m_numNativeTrampolines(0)
   , m_numHHIRTrans(0)
   , m_catchTraceMap(128)
 {
@@ -1839,6 +1817,7 @@ void MCGenerator::initUniqueStubs() {
   CodeCache::Selector cbSel(CodeCache::Selector::Args(code).
                             hot(m_tx.useAHot()));
   m_tx.uniqueStubs = mcg->backEnd().emitUniqueStubs();
+  m_fixups.process(nullptr); // in case we generated literals
 }
 
 void MCGenerator::registerCatchBlock(CTCA ip, TCA block) {
@@ -1928,12 +1907,12 @@ static Debug::TCRange rangeFrom(const CodeBlock& cb, const TCA addr,
 }
 
 void MCGenerator::recordBCInstr(uint32_t op,
-                                const CodeBlock& cb,
                                 const TCA addr,
+                                const TCA end,
                                 bool cold) {
-  if (addr != cb.frontier()) {
-    m_debugInfo.recordBCInstr(Debug::TCRange(addr, cb.frontier(),
-                                             cold), op);
+  if (addr != end) {
+    m_debugInfo.recordBCInstr(
+      Debug::TCRange(addr, end, cold), op);
   }
 }
 
@@ -2040,7 +2019,7 @@ bool MCGenerator::addDbgGuards(const Unit* unit) {
       addDbgGuardImpl(sk, sr);
     }
   }
-  mcg->cgFixups().process();
+  mcg->cgFixups().process(nullptr);
   Translator::WriteLease().drop();
   HPHP::Timer::GetMonotonicTime(tsEnd);
   int64_t elapsed = gettime_diff_us(tsBegin, tsEnd);
@@ -2078,7 +2057,7 @@ bool MCGenerator::addDbgGuard(const Func* func, Offset offset, bool resumed) {
       addDbgGuardImpl(sk, sr);
     }
   }
-  mcg->cgFixups().process();
+  mcg->cgFixups().process(nullptr);
   Translator::WriteLease().drop();
   return true;
 }
@@ -2117,16 +2096,6 @@ bool MCGenerator::dumpTCCode(const char* filename) {
   if (result) {
     count = code.frozen().used();
     result = (fwrite(code.frozen().base(), 1, count, afrozenFile) == count);
-  }
-  if (result) {
-    for (auto const& pair : m_trampolineMap) {
-      void* helperAddr = pair.first;
-      void* trampAddr = pair.second;
-      auto functionName = getNativeFunctionName(helperAddr);
-      fprintf(helperAddrFile,"%10p %10p %s\n",
-              trampAddr, helperAddr,
-              functionName.c_str());
-    }
   }
   return result;
 }
@@ -2216,8 +2185,14 @@ void MCGenerator::setJmpTransID(TCA jmp) {
 }
 
 void RelocationInfo::recordAddress(TCA src, TCA dest, int range) {
-  assert(m_destSize == size_t(-1) || dest - m_dest >= m_destSize);
-  m_destSize = dest - m_dest;
+  if (!m_dest) {
+    assert(m_destSize == size_t(-1));
+    m_dest = dest;
+    m_destSize = range;
+  } else {
+    assert(dest - m_dest + range >= m_destSize);
+    m_destSize = dest - m_dest + range;
+  }
   m_adjustedAddresses.emplace(src, std::make_pair(dest, range));
 }
 

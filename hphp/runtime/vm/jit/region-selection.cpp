@@ -29,9 +29,10 @@
 #include "hphp/util/map-walker.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
-#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/trans-cfg.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/translator.h"
 
 namespace HPHP { namespace JIT {
 
@@ -95,6 +96,19 @@ void truncateMap(Container& c, SrcKey final) {
 
 void RegionDesc::addArc(BlockId src, BlockId dst) {
   arcs.push_back({src, dst});
+}
+
+void RegionDesc::renumberBlock(BlockId oldId, BlockId newId) {
+  for (auto& block : blocks) {
+    if (block->id() == oldId) {
+      block->setId(newId);
+      break;
+    }
+  }
+  for (auto& arc : arcs) {
+    if (arc.src == oldId) arc.src = newId;
+    if (arc.dst == oldId) arc.dst = newId;
+  }
 }
 
 void RegionDesc::setSideExitingBlock(BlockId bid) {
@@ -312,7 +326,7 @@ RegionDescPtr selectRegion(const RegionContext& context,
         case RegionMode::Method:
           return selectMethod(context);
         case RegionMode::Tracelet:
-          return selectTracelet(context, 0, kind == TransKind::Profile);
+          return selectTracelet(context, kind == TransKind::Profile);
       }
       not_reached();
     } catch (const std::exception& e) {
@@ -393,6 +407,34 @@ bool preCondsAreSatisfied(const RegionDesc::BlockPtr& block,
     }
   }
   return true;
+}
+
+bool breaksRegion(Op opc) {
+  switch (opc) {
+    case OpMIterNext:
+    case OpMIterNextK:
+    case OpSwitch:
+    case OpSSwitch:
+    case OpCreateCont:
+    case OpYield:
+    case OpYieldK:
+    case OpRetC:
+    case OpRetV:
+    case OpExit:
+    case OpFatal:
+    case OpMIterInit:
+    case OpMIterInitK:
+    case OpIterBreak:
+    case OpDecodeCufIter:
+    case OpThrow:
+    case OpUnwind:
+    case OpEval:
+    case OpNativeImpl:
+      return true;
+
+    default:
+      return false;
+  }
 }
 
 //////////////////////////////////////////////////////////////////////

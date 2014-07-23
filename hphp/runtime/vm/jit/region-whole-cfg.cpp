@@ -19,6 +19,7 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/container/flat_map.hpp>
 
+#include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/trans-cfg.h"
 #include "hphp/util/trace.h"
@@ -56,6 +57,9 @@ RegionDescPtr selectWholeCFG(TransID triggerId,
       region->blocks.insert(region->blocks.end(),
                             transRegion->blocks.begin(),
                             transRegion->blocks.end());
+      region->arcs.insert(region->arcs.end(),
+                          transRegion->arcs.begin(),
+                          transRegion->arcs.end());
       selectedSet.insert(tid);
       if (selectedVec) selectedVec->push_back(tid);
       srcKeyToTransID[sk] = tid;
@@ -66,12 +70,16 @@ RegionDescPtr selectWholeCFG(TransID triggerId,
   // Initialize the region and bookkeeping.
   addToRegion(triggerId);
   worklist.push(triggerId);
-  selectedSet.insert(triggerId);
+  visited.insert(triggerId);
 
   // Traverse the CFG depth-first, adding blocks that meet the conditions.
   while (!worklist.empty()) {
     auto tid = worklist.top();
     worklist.pop();
+
+    if (breaksRegion(*(profData->transLastInstr(tid)))) {
+      continue;
+    }
 
     for (auto const arc : cfg.outArcs(tid)) {
       auto dst = arc->dst();
@@ -94,8 +102,9 @@ RegionDescPtr selectWholeCFG(TransID triggerId,
 
       // Add the block and arc to region.
       addToRegion(dst);
+      auto predBlockId = profData->transRegion(tid)->blocks.back().get()->id();
       auto dstBlockId = dstRegion->blocks.front().get()->id();
-      region->addArc(transBlocks[tid], dstBlockId);
+      region->addArc(predBlockId, dstBlockId);
 
       // Push the dst if we haven't already processed it.
       if (visited.count(dst) == 0) {

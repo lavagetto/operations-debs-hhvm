@@ -145,7 +145,6 @@ bad_tests = (
     # broken in contbuild for unknown reasons
     '/ext/standard/tests/strings/bug51059.php',
     '/ext/posix/tests/posix_kill_basic.php',
-    '/ext/spl/tests/RecursiveDirectoryIterator_getSubPath_basic.php',
     '/tests/classes/unset_properties.php',
     '/ext/pcntl/tests/pcntl_wait.php',
 
@@ -210,6 +209,7 @@ bad_tests = (
     '/ext/standard/tests/file/copy_variation8.php',
 
     # flaky: t3851970
+    '/ext/standard/tests/general_functions/proc_open02.php',
     '/ext/ftp/tests/bug39458.php',
     '/ext/standard/tests/file/rename_variation3.php',
     '/ext/standard/tests/file/mkdir-003.php',
@@ -732,11 +732,36 @@ other_files = (
     '/ext/standard/tests/general_functions/get_included_files_inc3.inc',
     '/ext/standard/tests/general_functions/parse_ini_basic.data',
     '/ext/standard/tests/general_functions/parse_ini_booleans.data',
+    '/ext/standard/tests/image/200x100.bmp',
+    '/ext/standard/tests/image/200x100.gif',
+    '/ext/standard/tests/image/200x100.jpg',
+    '/ext/standard/tests/image/200x100.png',
+    '/ext/standard/tests/image/200x100.swf',
+    '/ext/standard/tests/image/200x100.tif',
+    '/ext/standard/tests/image/200x100_unknown.unknown',
     '/ext/standard/tests/image/246x247.png',
+    '/ext/standard/tests/image/2x2mm.tif',
     '/ext/standard/tests/image/384x385.png',
+    '/ext/standard/tests/image/75x50.wbmp',
+    '/ext/standard/tests/image/75x50.xbm',
+    '/ext/standard/tests/image/blank_file.bmp',
     '/ext/standard/tests/image/bug13213.jpg',
+    '/ext/standard/tests/image/skipif_imagetype.inc',
+    '/ext/standard/tests/image/test.gif',
+    '/ext/standard/tests/image/test.txt',
     '/ext/standard/tests/image/test13pix.swf',
+    '/ext/standard/tests/image/test1bpix.bmp',
+    '/ext/standard/tests/image/test1pix.bmp',
+    '/ext/standard/tests/image/test1pix.jp2',
+    '/ext/standard/tests/image/test1pix.jpc',
     '/ext/standard/tests/image/test1pix.jpg',
+    '/ext/standard/tests/image/test2pix.gif',
+    '/ext/standard/tests/image/test4pix.gif',
+    '/ext/standard/tests/image/test4pix.iff',
+    '/ext/standard/tests/image/test4pix.png',
+    '/ext/standard/tests/image/test4pix.psd',
+    '/ext/standard/tests/image/test4pix.swf',
+    '/ext/standard/tests/image/test4pix.tif',
     '/ext/standard/tests/image/testAPP.jpg',
     '/ext/standard/tests/math/allowed_rounding_error.inc',
     '/ext/standard/tests/serialize/autoload_implements.p5c',
@@ -749,6 +774,9 @@ other_files = (
     '/ext/xmlreader/tests/relaxNG.rng',
     '/ext/xmlreader/tests/relaxNG2.rng',
     '/ext/xmlreader/tests/relaxNG3.rng',
+    '/ext/xsl/tests/53965/collection.xml',
+    '/ext/xsl/tests/53965/collection.xsl',
+    '/ext/xsl/tests/53965/include.xsl',
     '/ext/xsl/tests/area_list.xsl',
     '/ext/xsl/tests/area_name.xml',
     '/ext/xsl/tests/bug49634.xml',
@@ -928,6 +956,9 @@ def walk(filename, dest_subdir):
                     '\nNotice: '+match_rest_of_line, exp)
             exp = re.sub(r'object\((\w+)\)#\d+', 'object(\\1)#%d', exp)
 
+            exp = re.sub('string\(7\) "Closure"', 'string(%d) "Closure%s"', exp)
+            exp = re.sub('Closure(?!%s)', 'Closure%s', exp)
+
             sections[key] = exp
 
     if sections.has_key('EXPECT'):
@@ -1094,6 +1125,10 @@ def walk(filename, dest_subdir):
         test = test.replace('/parse.ini', '/bug46347.ini')
     if '/ext/standard/tests/file/parse_ini_file.php' in full_dest_filename:
         test = test.replace('/parse.ini', '/parse_ini_file.ini')
+    if '/Zend/tests/closure_016.php' in full_dest_filename:
+        # undo closure% only for first two instances
+        exp = exp.replace('Closure%s::', 'Closure::', 2)
+        file(full_dest_filename + '.expectf', 'w').write(exp)
     if '/ext/mysqli/tests/' in full_dest_filename:
 
         (testname, _) = os.path.splitext(os.path.basename(full_dest_filename))

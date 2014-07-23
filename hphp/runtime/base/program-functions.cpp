@@ -60,8 +60,10 @@
 #include "hphp/runtime/base/extended-logger.h"
 #include "hphp/runtime/base/stream-wrapper-registry.h"
 #include "hphp/runtime/vm/debug/debug.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/system/constants.h"
 #include "hphp/runtime/base/config.h"
+#include "hphp/runtime/base/backtrace.h"
 
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/positional_options.hpp>
@@ -335,7 +337,7 @@ enum class ContextOfException {
 
 static void handle_exception_append_bt(std::string& errorMsg,
                                        const ExtendedException& e) {
-  Array bt = e.getBackTrace();
+  Array bt = e.getBacktrace();
   if (!bt.empty()) {
     errorMsg += ExtendedLogger::StringOfStackTrace(bt);
   }
@@ -380,7 +382,7 @@ static void handle_exception_helper(bool& ret,
     } else if (where != ContextOfException::Handler &&
         !context->getExitCallback().isNull() &&
         f_is_callable(context->getExitCallback())) {
-      Array stack = e.getBackTrace();
+      Array stack = e.getBacktrace();
       Array argv = make_packed_array(ExitException::ExitCode.load(), stack);
       vm_call_user_func(context->getExitCallback(), argv);
     }
@@ -584,7 +586,7 @@ void execute_command_line_begin(int argc, char **argv, int xhprof,
     serverArr.set(s_argc, php_global(s_argc));
     serverArr.set(s_PWD, g_context->getCwd());
     char hostname[1024];
-    if (!gethostname(hostname, 1024)) {
+    if (RuntimeOption::ServerExecutionMode() && !gethostname(hostname, 1024)) {
       serverArr.set(s_HOSTNAME, String(hostname, CopyString));
     }
 
@@ -1300,6 +1302,12 @@ static int execute_program_impl(int argc, char** argv) {
   compile_file(0, 0, MD5(), 0);
 
   if (!po.lint.empty()) {
+    Logger::LogHeader = false;
+    Logger::LogLevel = Logger::LogInfo;
+    Logger::UseCronolog = false;
+    Logger::UseLogFile = true;
+    Logger::SetNewOutput(nullptr);
+
     if (po.isTempFile) {
       tempFile = po.lint;
     }
@@ -1317,8 +1325,9 @@ static int execute_program_impl(int argc, char** argv) {
         VMParserFrame parserFrame;
         parserFrame.filename = po.lint.c_str();
         parserFrame.lineNumber = line;
-        Array bt = g_context->debugBacktrace(false, true,
-                                               false, &parserFrame);
+        Array bt = createBacktrace(BacktraceArgs()
+                                   .withSelf()
+                                   .setParserFrame(&parserFrame));
         throw FatalErrorException(msg->data(), bt);
       }
     } catch (FileOpenException &e) {
@@ -1793,6 +1802,8 @@ void hphp_process_exit() {
   for (InitFiniNode *in = extra_process_exit; in; in = in->next) {
     in->func();
   }
+  delete JIT::mcg;
+  JIT::mcg = nullptr;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

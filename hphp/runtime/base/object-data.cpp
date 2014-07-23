@@ -71,7 +71,10 @@ static Array convert_to_array(const ObjectData* obj, HPHP::Class* cls) {
     cls, s_storage.get(),
     visible, accessible, unset
   );
-  assert(visible && accessible && !unset);
+  // We currently do not special case ArrayObjects / ArrayIterators in
+  // reflectionClass. Until, either ArrayObject moves to HNI or a special
+  // case is added to reflection unset should be turned off.
+  assert(visible && accessible /* && !unset */);
   return tvAsCVarRef(prop).toArray();
 }
 
@@ -428,6 +431,8 @@ Array ObjectData::o_toArray(bool pubOnly /* = false */) const {
     return convert_to_array(this, SystemLib::s_ArrayObjectClass);
   } else if (UNLIKELY(instanceof(SystemLib::s_ArrayIteratorClass))) {
     return convert_to_array(this, SystemLib::s_ArrayIteratorClass);
+  } else if (UNLIKELY(instanceof(SystemLib::s_ClosureClass))) {
+    return Array::Create(Object(const_cast<ObjectData*>(this)));
   } else {
     Array ret(ArrayData::Create());
     o_getArray(ret, pubOnly);
@@ -507,8 +512,10 @@ Array ObjectData::o_toIterArray(const String& context,
 
   // Now get dynamic properties.
   if (dynProps) {
-    ssize_t iter = dynProps->get()->iter_begin();
-    while (iter != ArrayData::invalid_index) {
+    auto ad = dynProps->get();
+    ssize_t iter = ad->iter_begin();
+    auto pos_limit = ad->iter_end();
+    while (iter != pos_limit) {
       TypedValue key;
       dynProps->get()->nvGetKey(&key, iter);
       iter = dynProps->get()->iter_advance(iter);
@@ -670,6 +677,14 @@ inline Array getSerializeProps(const ObjectData* obj,
     // When ArrayIterator is casted to an array, it return it's array object,
     // however when it's being var_dump'd or print_r'd, it shows it's properties
     if (UNLIKELY(obj->instanceof(SystemLib::s_ArrayIteratorClass))) {
+      Array ret(ArrayData::Create());
+      obj->o_getArray(ret);
+      return ret;
+    }
+
+    // Same with Closure, since it's a dynamic object but still has it's own
+    // different behavior for var_dump and cast to array
+    if (UNLIKELY(obj->instanceof(SystemLib::s_ClosureClass))) {
       Array ret(ArrayData::Create());
       obj->o_getArray(ret);
       return ret;
@@ -1058,7 +1073,9 @@ void ObjectData::DeleteObject(ObjectData* objectData) {
 Object ObjectData::FromArray(ArrayData* properties) {
   ObjectData* retval = ObjectData::newInstance(SystemLib::s_stdclassClass);
   auto& dynArr = retval->reserveProperties(properties->size());
-  for (ssize_t pos = properties->iter_begin(); pos != ArrayData::invalid_index;
+  auto pos_limit = properties->iter_end();
+  for (ssize_t pos = properties->iter_begin();
+       pos != pos_limit;
        pos = properties->iter_advance(pos)) {
     auto const value = properties->getValueRef(pos);
     TypedValue key;
@@ -1796,7 +1813,7 @@ String ObjectData::invokeToString() {
     // recoverable error
     raise_recoverable_error(
       "Object of class %s could not be converted to string",
-      m_cls->preClass()->name()->data()
+      classname_cstr()
     );
     // If the user error handler decides to allow execution to continue,
     // we return the empty string.
@@ -1835,9 +1852,10 @@ void ObjectData::cloneSet(ObjectData* clone) {
     auto& dynProps = dynPropArray();
     auto& cloneProps = clone->reserveProperties(dynProps.size());
 
-    ssize_t iter = dynProps.get()->iter_begin();
-    while (iter != ArrayData::invalid_index) {
-      auto const props = dynProps.get();
+    auto const props = dynProps.get();
+    ssize_t iter = props->iter_begin();
+    auto pos_limit = props->iter_end();
+    while (iter != pos_limit) {
       assert(MixedArray::asMixed(props));
 
       TypedValue key;
@@ -1864,7 +1882,7 @@ void ObjectData::cloneSet(ObjectData* clone) {
       }
 
       tvDupFlattenVars(val, ret, cloneProps.get());
-      iter = MixedArray::IterAdvance(dynProps.get(), iter);
+      iter = MixedArray::IterAdvance(props, iter);
     }
   }
 }
@@ -1901,6 +1919,12 @@ RefData* ObjectData::zGetProp(Class* ctx, const StringData* key,
                               bool& visible, bool& accessible,
                               bool& unset) {
   auto tv = getProp(ctx, key, visible, accessible, unset);
+  if (tv == 0) {
+    /*
+     * Protect against unknown object properties.
+     */
+    return nullptr;
+  }
   if (tv->m_type != KindOfRef) {
     tvBox(tv);
   }

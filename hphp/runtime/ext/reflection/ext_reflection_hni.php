@@ -37,7 +37,7 @@ abstract class ReflectionFunctionAbstract implements Reflector {
    *
    * @return     bool   Returns TRUE on success or FALSE on failure.
    */
-  final public function inNamespace(): bool {
+  public function inNamespace(): bool {
     return strrpos($this->getName(), '\\') !== false;
   }
 
@@ -49,7 +49,7 @@ abstract class ReflectionFunctionAbstract implements Reflector {
    *
    * @return     string   The namespace name.
    */
-  final public function getNamespaceName(): string {
+  public function getNamespaceName(): string {
     $name = $this->getName();
     $pos = strrpos($name, '\\');
     return ($pos === false) ? '' : substr($name, 0, $pos);
@@ -63,7 +63,7 @@ abstract class ReflectionFunctionAbstract implements Reflector {
    *
    * @return     string  The short name of the function.
    */
-  final public function getShortName(): string {
+  public function getShortName(): string {
     $name = $this->getName();
     $pos = strrpos($name, '\\');
     return ($pos === false) ? $name : substr($name, $pos + 1);
@@ -82,8 +82,6 @@ abstract class ReflectionFunctionAbstract implements Reflector {
   <<__Native>>
   public function isInternal(): bool;
 
-  abstract public function getClosure();
-
   /**
    * ( excerpt from
    * http://php.net/manual/en/reflectionfunctionabstract.isclosure.php )
@@ -93,7 +91,9 @@ abstract class ReflectionFunctionAbstract implements Reflector {
    *
    * @return     bool   TRUE if it's a closure, otherwise FALSE
    */
-  abstract public function isClosure(): bool;
+  public function isClosure(): bool {
+    return false;
+  }
 
   /**
    * ( excerpt from
@@ -319,6 +319,26 @@ abstract class ReflectionFunctionAbstract implements Reflector {
     return null;
   }
 
+  /**
+   * ( excerpt from
+   * http://www.php.net/manual/en/reflectionfunctionabstract.getclosurescopeclass.php
+   * )
+   *
+   * Returns the scope associated to the closure
+   *
+   * @return     mixed   Returns the class on success or NULL on failure.
+   */
+  public function getClosureScopeClass(): ?ReflectionClass {
+    return null;
+  }
+
+  // Prevent cloning
+  final public function __clone() {
+    throw new BadMethodCallException(
+      'Trying to clone an uncloneable object of class ' . get_class($this)
+    );
+  }
+
   // Implementation of __toString
   final protected function toString(
     $type,
@@ -377,6 +397,8 @@ abstract class ReflectionFunctionAbstract implements Reflector {
 
 <<__Native>>
 function hphp_miarray(): array;
+<<__Native>>
+function hphp_msarray(): array;
 
 
 /**
@@ -488,13 +510,6 @@ class ReflectionFunction extends ReflectionFunctionAbstract {
    */
   public function __toString(): string {
     return $this->toString($this->isClosure() ? 'Closure' : 'Function');
-  }
-
-  // Prevent cloning
-  public function __clone() {
-    throw new BadMethodCallException(
-      'Trying to clone an uncloneable object of class ' . get_class($this),
-    );
   }
 
   /**
@@ -747,13 +762,6 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
     return $this->toString('Method', $preAttrs, $funcAttrs);
   }
 
-  // Prevent cloning
-  public function __clone() {
-    throw new BadMethodCallException(
-      'Trying to clone an uncloneable object of class ReflectionMethod'
-    );
-  }
-
   /**
    * ( excerpt from http://php.net/manual/en/reflectionmethod.export.php )
    *
@@ -991,10 +999,6 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
     return function (...$args) use ($object) {
       return $this->invokeArgs($object, $args);
     };
-  }
-
-  public function isClosure(): bool {
-    return false;
   }
 
   /**
@@ -1246,7 +1250,7 @@ class ReflectionClass implements Reflector, Serializable {
   }
 
   // Prevent cloning
-  public function __clone() {
+  final public function __clone() {
     throw new BadMethodCallException(
       'Trying to clone an uncloneable object of class ReflectionClass'
     );
@@ -1319,7 +1323,7 @@ class ReflectionClass implements Reflector, Serializable {
    *
    * @return     bool   Returns TRUE on success or FALSE on failure.
    */
-  final public function inNamespace(): bool {
+  public function inNamespace(): bool {
     return strrpos($this->getName(), '\\') !== false;
   }
 
@@ -1331,7 +1335,7 @@ class ReflectionClass implements Reflector, Serializable {
    *
    * @return     string   The namespace name.
    */
-  final public function getNamespaceName(): string {
+  public function getNamespaceName(): string {
     $name = $this->getName();
     $pos = strrpos($name, '\\');
     return ($pos === false) ? '' : substr($name, 0, $pos);
@@ -1345,7 +1349,7 @@ class ReflectionClass implements Reflector, Serializable {
    *
    * @return     string  The short name of the function.
    */
-  final public function getShortName(): string {
+  public function getShortName(): string {
     $name = $this->getName();
     $pos = strrpos($name, '\\');
     return ($pos === false) ? $name : substr($name, $pos + 1);
@@ -1534,11 +1538,25 @@ class ReflectionClass implements Reflector, Serializable {
    *                     ReflectionClass objects.
    */
   public function getInterfaces(): array<string, ReflectionClass> {
-    $ret = array();
-    foreach ($this->getInterfaceNames() as $name) {
-      $ret[$name] = new ReflectionClass($name);
-    }
-    return $ret;
+    return $this->getReflectionClassesFromNames($this->getInterfaceNames());
+  }
+
+  /**
+   * Gets the list of implemented interfaces/inherited classes needed to
+   * implement an interface / use a trait. Empty array for abstract and
+   * concrete classes.
+   */
+  <<__Native>>
+  public function getRequirementNames(): array<string>;
+
+  /**
+   * Gets ReflectionClass-es for the requirements of this class
+   *
+   * @return  An associative array of requirements, with keys as
+   *          requirement names and the array values as ReflectionClass objects.
+   */
+  public function getRequirements(): array<string, ReflectionClass> {
+    return $this->getReflectionClassesFromNames($this->getRequirementNames());
   }
 
   /**
@@ -1579,8 +1597,15 @@ class ReflectionClass implements Reflector, Serializable {
    *                     Returns NULL in case of an error.
    */
   public function getTraits(): array<string, ReflectionClass> {
+    return $this->getReflectionClassesFromNames($this->getTraitNames());
+  }
+
+  /**
+   * Helper for the get{Traits,Interfaces,Requirements} methods
+   */
+  private function getReflectionClassesFromNames(array<string> $names) {
     $ret = array();
-    foreach ($this->getTraitNames() as $name) {
+    foreach ($names as $name) {
       $ret[$name] = new ReflectionClass($name);
     }
     return $ret;

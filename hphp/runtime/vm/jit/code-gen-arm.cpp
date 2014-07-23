@@ -119,6 +119,7 @@ NOOP_OPCODE(Nop)
 NOOP_OPCODE(DefLabel)
 NOOP_OPCODE(ExceptionBarrier)
 NOOP_OPCODE(TakeStack)
+NOOP_OPCODE(TakeRef)
 NOOP_OPCODE(EndGuards)
 
 // XXX
@@ -205,7 +206,7 @@ CALL_OPCODE(CreateCont)
 CALL_OPCODE(CreateAFWH)
 CALL_OPCODE(CreateSSWH)
 CALL_OPCODE(AFWHPrepareChild)
-CALL_OPCODE(BWHUnblockChain)
+CALL_OPCODE(ABCUnblock)
 CALL_OPCODE(TypeProfileFunc)
 CALL_OPCODE(IncStatGrouped)
 CALL_OPCODE(ZeroErrorLevel)
@@ -295,6 +296,12 @@ PUNT_OPCODE(Lt)
 PUNT_OPCODE(Lte)
 PUNT_OPCODE(Eq)
 PUNT_OPCODE(Neq)
+PUNT_OPCODE(GtDbl)
+PUNT_OPCODE(GteDbl)
+PUNT_OPCODE(LtDbl)
+PUNT_OPCODE(LteDbl)
+PUNT_OPCODE(EqDbl)
+PUNT_OPCODE(NeqDbl)
 PUNT_OPCODE(LtX)
 PUNT_OPCODE(GtX)
 PUNT_OPCODE(GteX)
@@ -493,7 +500,7 @@ PUNT_OPCODE(LdContArKey)
 PUNT_OPCODE(StContArKey)
 PUNT_OPCODE(StAsyncArRaw)
 PUNT_OPCODE(StAsyncArResult)
-PUNT_OPCODE(LdAsyncArFParent)
+PUNT_OPCODE(LdAsyncArParentChain)
 PUNT_OPCODE(AFWHBlockOn)
 PUNT_OPCODE(LdWHState)
 PUNT_OPCODE(LdWHResult)
@@ -623,7 +630,7 @@ void CodeGenerator::recordHostCallSyncPoint(vixl::MacroAssembler& as,
                                             TCA tca) {
   auto stackOff = m_curInst->marker().spOff();
   auto pcOff = m_curInst->marker().bcOff() - m_curInst->marker().func()->base();
-  m_mcg->recordSyncPoint(tca, pcOff, stackOff);
+  mcg->recordSyncPoint(tca, pcOff, stackOff);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1024,18 +1031,19 @@ static void shuffleArgs(vixl::MacroAssembler& a,
   PhysReg::Map<PhysReg> moves;
   PhysReg::Map<ArgDesc*> argDescs;
 
-  for (size_t i = 0; i < args.numRegArgs(); i++) {
-    auto kind = args[i].kind();
+  for (size_t i = 0; i < args.numGpArgs(); i++) {
+    auto& arg = args.gpArg(i);
+    auto kind = arg.kind();
     if (!(kind == ArgDesc::Kind::Reg  ||
           kind == ArgDesc::Kind::Addr ||
           kind == ArgDesc::Kind::TypeReg)) {
       continue;
     }
-    auto dstReg = args[i].dstReg();
-    auto srcReg = args[i].srcReg();
+    auto dstReg = arg.dstReg();
+    auto srcReg = arg.srcReg();
     if (dstReg != srcReg) {
       moves[dstReg] = srcReg;
-      argDescs[dstReg] = &args[i];
+      argDescs[dstReg] = &arg;
     }
     switch (call.kind()) {
     case CppCall::Kind::Indirect:
@@ -1085,17 +1093,17 @@ static void shuffleArgs(vixl::MacroAssembler& a,
     }
   }
 
-  for (size_t i = 0; i < args.numRegArgs(); ++i) {
-    if (!args[i].done()) {
-      auto kind = args[i].kind();
-      auto dstReg = x2a(args[i].dstReg());
-      if (kind == ArgDesc::Kind::Imm) {
-        a.  Mov  (dstReg, args[i].imm().q());
-      } else if (kind == ArgDesc::Kind::Reg || kind == ArgDesc::Kind::TypeReg) {
-        // Should have already been done
-      } else {
-        not_implemented();
-      }
+  for (size_t i = 0; i < args.numGpArgs(); ++i) {
+    auto& arg = args.gpArg(i);
+    if (arg.done()) continue;
+    auto kind = arg.kind();
+    auto dstReg = x2a(arg.dstReg());
+    if (kind == ArgDesc::Kind::Imm) {
+      a.  Mov  (dstReg, arg.imm().q());
+    } else if (kind == ArgDesc::Kind::Reg || kind == ArgDesc::Kind::TypeReg) {
+      // Should have already been done
+    } else {
+      not_implemented();
     }
   }
 }
@@ -1152,8 +1160,8 @@ void CodeGenerator::cgCallHelper(vixl::MacroAssembler& a,
   saver.emitPushes(a);
   SCOPE_EXIT { saver.emitPops(a); };
 
-  for (size_t i = 0; i < args.numRegArgs(); i++) {
-    args[i].setDstReg(PhysReg{argReg(i)});
+  for (size_t i = 0; i < args.numGpArgs(); i++) {
+    args.gpArg(i).setDstReg(PhysReg{argReg(i)});
   }
   shuffleArgs(a, args, call);
 
@@ -1172,7 +1180,7 @@ void CodeGenerator::cgCallHelper(vixl::MacroAssembler& a,
     assert_not_implemented(args.numStackArgs() == 0);
     info.rspOffset = args.numStackArgs();
   } else if (!m_curInst->is(Call, CallArray, ContEnter)) {
-    m_mcg->registerCatchBlock(a.frontier(), nullptr);
+    mcg->registerCatchBlock(a.frontier(), nullptr);
   }
 
   vixl::CPURegister armDst0(dstReg0);
@@ -1287,7 +1295,7 @@ void CodeGenerator::emitTypeTest(Type type, vixl::Register typeReg, Loc dataSrc,
   }
   doJcc(cc);
   if (type < Type::Obj) {
-    assert(type.getClass()->attrs() & AttrFinal);
+    assert(type.getClass()->attrs() & AttrNoOverride);
     auto dataReg = enregister(m_as, dataSrc, rAsm);
     emitLdLowPtr(m_as, rAsm, dataReg[ObjectData::getVMClassOffset()],
                  sizeof(LowClassPtr));
@@ -1313,7 +1321,7 @@ void CodeGenerator::cgGuardLoc(IRInstruction* inst) {
     rFP[baseOff + TVOFF(m_data)],
     [&] (ConditionCode cc) {
       auto const destSK = SrcKey(curFunc(), m_unit.bcOff(), resumed());
-      auto const destSR = m_mcg->tx().getSrcRec(destSK);
+      auto const destSR = mcg->tx().getSrcRec(destSK);
       destSR->emitFallbackJump(this->m_mainCode, ccNegate(cc));
     });
 }
@@ -1328,7 +1336,7 @@ void CodeGenerator::cgGuardStk(IRInstruction* inst) {
     rSP[baseOff + TVOFF(m_data)],
     [&] (ConditionCode cc) {
       auto const destSK = SrcKey(curFunc(), m_unit.bcOff(), resumed());
-      auto const destSR = m_mcg->tx().getSrcRec(destSK);
+      auto const destSR = mcg->tx().getSrcRec(destSK);
       destSR->emitFallbackJump(this->m_mainCode, ccNegate(cc));
     });
 }
@@ -1461,7 +1469,7 @@ void CodeGenerator::cgGuardRefs(IRInstruction* inst) {
   assert((vals64 & mask64) == vals64);
 
   auto const destSK = SrcKey(curFunc(), m_unit.bcOff(), resumed());
-  auto const destSR = m_mcg->tx().getSrcRec(destSK);
+  auto const destSR = mcg->tx().getSrcRec(destSK);
 
   auto thenBody = [&] {
     auto bitsOff = sizeof(uint64_t) * (firstBitNum / 64);
@@ -1547,7 +1555,7 @@ void CodeGenerator::cgReqBindJmp(IRInstruction* inst) {
 void CodeGenerator::cgReqRetranslate(IRInstruction* inst) {
   assert(m_unit.bcOff() == inst->marker().bcOff());
   auto const destSK = SrcKey(curFunc(), m_unit.bcOff(), resumed());
-  auto const destSR = m_mcg->tx().getSrcRec(destSK);
+  auto const destSR = mcg->tx().getSrcRec(destSK);
   destSR->emitFallbackJump(m_mainCode);
 }
 
@@ -1725,7 +1733,7 @@ void CodeGenerator::cgBeginCatch(IRInstruction* inst) {
   auto const& info = m_state.catches[inst->block()];
   assert(info.afterCall);
 
-  m_mcg->registerCatchBlock(info.afterCall, m_as.frontier());
+  mcg->registerCatchBlock(info.afterCall, m_as.frontier());
 
   assert(info.rspOffset == 0);
   RegSaver regSaver(info.savedRegs);
@@ -1894,7 +1902,7 @@ void CodeGenerator::cgLdARFuncPtr(IRInstruction* inst) {
 void CodeGenerator::cgLdFuncCached(IRInstruction* inst) {
   auto dstReg = x2a(dstLoc(0).reg());
   auto const name = inst->extra<LdFuncCachedData>()->name;
-  auto const ch = Unit::GetNamedEntity(name)->getFuncHandle();
+  auto const ch = NamedEntity::get(name)->getFuncHandle();
   vixl::Label noLookup;
 
   if (!dstReg.IsValid()) {

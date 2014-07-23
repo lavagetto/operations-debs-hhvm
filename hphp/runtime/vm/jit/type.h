@@ -37,9 +37,6 @@ struct Func;
 
 namespace JIT {
 struct DynLocation;
-struct RuntimeType;
-}
-namespace JIT {
 
 namespace constToBits_detail {
   template<class T>
@@ -113,7 +110,8 @@ namespace constToBits_detail {
   IRT(TCA,         1ULL << 52)                                          \
   IRT(ActRec,      1ULL << 53)                                          \
   IRT(RDSHandle,   1ULL << 54) /* RDS::Handle */                        \
-  IRT(Nullptr,     1ULL << 55)
+  IRT(Nullptr,     1ULL << 55)                                          \
+  IRT(ABC,         1ULL << 56) /* AsioBlockableChain */
 
 // The definitions for these are in ir.cpp
 #define IRT_UNIONS                                                      \
@@ -179,6 +177,36 @@ class Type {
   // valid.
   enum class ArrayInfo : uintptr_t {};
 
+  // Tag that tells us if we're exactly equal to, or a subtype of a Class*.
+  enum class ClassTag : uint8_t { Sub, Exact };
+
+  // A const Class* with the low bit set if this is an exact type,
+  // otherwise a subtype.
+  struct ClassInfo {
+    ClassInfo(const Class* cls, ClassTag tag)
+        : m_bits(reinterpret_cast<uintptr_t>(cls)) {
+      assert((m_bits & 1) == 0);
+      switch (tag) {
+        case ClassTag::Sub:
+          break;
+        case ClassTag::Exact:
+          m_bits |= 1;
+          break;
+      }
+    }
+
+    const Class* get() const {
+      return reinterpret_cast<const Class*>(m_bits & ~1);
+    }
+
+    bool isExact() const { return m_bits & 1; }
+
+    bool operator==(const ClassInfo& rhs) const { return m_bits == rhs.m_bits; }
+
+  private:
+    uintptr_t m_bits;
+  };
+
   bits_t m_bits:63;
   bool m_hasConstVal:1;
 
@@ -198,7 +226,7 @@ class Type {
     TypedValue* m_ptrVal;
 
     // Specialization for object classes and arrays.
-    const Class* m_class;
+    ClassInfo m_class;
     ArrayInfo m_arrayInfo;
   };
 
@@ -241,10 +269,10 @@ class Type {
     assert(checkValid());
   }
 
-  explicit Type(bits_t bits, const Class* klass)
+  explicit Type(bits_t bits, ClassInfo classInfo)
     : m_bits(bits)
     , m_hasConstVal(false)
-    , m_class(klass)
+    , m_class(classInfo)
   {
     assert(checkValid());
   }
@@ -269,6 +297,7 @@ class Type {
   struct Union;
   struct Intersect;
   struct ArrayOps;
+  struct ClassOps;
 
 public:
 # define IRT(name, ...) static const Type name;
@@ -287,7 +316,6 @@ public:
     , m_extra(0)
   {}
 
-  explicit Type(const RuntimeType& rtt);
   explicit Type(const DynLocation* dl);
 
   size_t hash() const {
@@ -601,8 +629,13 @@ public:
   }
 
   Type specialize(const Class* klass) const {
-    assert(canSpecializeClass() && m_class == nullptr);
-    return Type(m_bits, klass);
+    assert(canSpecializeClass() && getClass() == nullptr);
+    return Type(m_bits, ClassInfo(klass, ClassTag::Sub));
+  }
+
+  Type specializeExact(const Class* klass) const {
+    assert(canSpecializeClass() && getClass() == nullptr);
+    return Type(m_bits, ClassInfo(klass, ClassTag::Exact));
   }
 
   Type specialize(ArrayData::ArrayKind arrayKind) const {
@@ -626,7 +659,12 @@ public:
 
   const Class* getClass() const {
     assert(canSpecializeClass());
-    return m_class;
+    return m_class.get();
+  }
+
+  const Class* getExactClass() const {
+    assert(canSpecializeClass() || subtypeOf(Type::Cls));
+    return (m_hasConstVal || m_class.isExact()) ? getClass() : nullptr;
   }
 
   bool hasArrayKind() const {
@@ -785,8 +823,6 @@ public:
    * pre: isKnownDataType()
    */
   DataType toDataType() const;
-
-  RuntimeType toRuntimeType() const;
 };
 
 typedef folly::Optional<Type> OptType;
@@ -826,6 +862,13 @@ Type convertToType(RepoAuthType ty);
  */
 Type refineType(Type oldType, Type newType);
 
+/*
+ * Return the dest type for a LdRef with the given typeParam.
+ *
+ * pre: srcType.notBoxed()
+ */
+Type ldRefReturn(Type typeParam);
+
 //////////////////////////////////////////////////////////////////////
 
 struct TypeConstraint {
@@ -864,9 +907,13 @@ struct TypeConstraint {
 
   static constexpr uint8_t kWantArrayKind = 0x1;
 
+  bool isSpecialized() const {
+    return category == DataTypeSpecialized || innerCat == DataTypeSpecialized;
+  }
+
   TypeConstraint& setWantArrayKind() {
     assert(!wantClass());
-    assert(category == DataTypeSpecialized);
+    assert(isSpecialized());
     m_specialized |= kWantArrayKind;
     return *this;
   }
@@ -876,7 +923,7 @@ struct TypeConstraint {
   TypeConstraint& setDesiredClass(const Class* cls) {
     assert(m_specialized == 0 ||
            desiredClass()->classof(cls) || cls->classof(desiredClass()));
-    assert(category == DataTypeSpecialized || innerCat == DataTypeSpecialized);
+    assert(isSpecialized());
     m_specialized = reinterpret_cast<uintptr_t>(cls);
     assert(wantClass());
     return *this;

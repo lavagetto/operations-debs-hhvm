@@ -41,7 +41,6 @@ let revive funs classes =
 let declare content =
   Autocomplete.auto_complete := false;
   Autocomplete.auto_complete_for_global := "";
-  Autocomplete.auto_complete_result := SMap.empty;
   let declared_funs = ref SSet.empty in
   let declared_classes = ref SSet.empty in
   try 
@@ -135,3 +134,12 @@ let recheck file_names =
         | Ast.NamespaceUse _ -> assert false
         end defs
   end file_names
+
+let check_file_input fi =
+  match fi with
+    | ServerMsg.FileContent content ->
+        let funs, classes = declare content in
+        fix_file_and_def content;
+        revive funs classes;
+    | ServerMsg.FileName fn ->
+        recheck [fn];

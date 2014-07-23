@@ -69,6 +69,12 @@ bool HHVM_FUNCTION(class_alias, const String& original, const String& alias,
     raise_warning("Class %s not found", original.data());
     return false;
   }
+  if (origClass->isBuiltin()) {
+    raise_warning(
+      "First argument of class_alias() must be a name of user defined class");
+    return false;
+  }
+
   return Unit::aliasClass(origClass, alias.get());
 }
 
@@ -271,6 +277,8 @@ Variant HHVM_FUNCTION(get_called_class) {
         Variant::StaticStrInit{});
     }
   }
+
+  raise_warning("get_called_class() called from outside a class");
   return Variant(false);
 }
 

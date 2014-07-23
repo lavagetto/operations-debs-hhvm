@@ -21,7 +21,7 @@
 #include "thrift/lib/cpp/async/TAsyncTransport.h"
 #include "thrift/lib/cpp/transport/TSocketAddress.h"
 #include "thrift/lib/cpp/transport/TTransportException.h"
-#include "ti/proxygen/lib/services/ManagedConnection.h"
+#include "proxygen/lib/services/ManagedConnection.h"
 
 namespace HPHP {
 
@@ -40,6 +40,7 @@ public:
   virtual void describe(std::ostream& os) const;
   virtual bool isBusy() const;
   virtual void notifyPendingShutdown();
+  virtual void closeWhenIdle();
   virtual void dropConnection();
   virtual void dumpConnectionState(uint8_t loglevel);
 
@@ -57,4 +58,3 @@ protected:
 }
 
 #endif // incl_HPHP_RUNTIME_SERVER_FASTCGI_SOCKET_CONNECTION_H_
-

@@ -527,6 +527,7 @@ extern void ext_session_request_shutdown();
 
 void ExecutionContext::onShutdownPostSend() {
   ServerStats::SetThreadMode(ServerStats::ThreadMode::PostProcessing);
+  MM().resetCouldOOM();
   try {
     try {
       ServerStatsHelper ssh("psp", ServerStatsHelper::TRACK_HWINST);
@@ -644,7 +645,7 @@ void ExecutionContext::handleError(const std::string& msg,
   if (mode == ErrorThrowMode::Always ||
       (mode == ErrorThrowMode::IfUnhandled && !handled)) {
     DEBUGGER_ATTACHED_ONLY(phpDebuggerErrorHook(msg));
-    auto exn = FatalErrorException(msg, ee.getBackTrace());
+    auto exn = FatalErrorException(msg, ee.getBacktrace());
     exn.setSilent(!errorNeedsLogging(errnum));
     throw exn;
   }
@@ -695,7 +696,7 @@ bool ExecutionContext::callUserErrorHandler(const Exception &e, int errnum,
     String errfile;
     Array backtrace;
     if (auto const ee = dynamic_cast<const ExtendedException*>(&e)) {
-      Array arr = ee->getBackTrace();
+      Array arr = ee->getBacktrace();
       if (!arr.isNull()) {
         backtrace = arr;
         Array top = backtrace.rvalAt(0).toArray();

@@ -164,6 +164,9 @@ void in(ISS& env, const bc::Box&) {
 
 void in(ISS& env, const bc::BoxR&) {
   nothrow(env);
+  if (topR(env).subtypeOf(TRef)) {
+    return reduce(env, bc::BoxRNop {});
+  }
   popR(env);
   push(env, TRef);
 }
@@ -733,15 +736,28 @@ void in(ISS& env, const bc::CGetS&) {
   auto const tname = popC(env);
   auto const vname = tv(tname);
   auto const self  = selfCls(env);
+
   if (vname && vname->m_type == KindOfStaticString &&
       self && tcls.subtypeOf(*self)) {
     if (auto const ty = selfPropAsCell(env, vname->m_data.pstr)) {
       // Only nothrow when we know it's a private declared property
       // (and thus accessible here).
       nothrow(env);
+
+      // We can only constprop here if we know for sure this is exactly the
+      // correct class.  The reason for this is that you could have a LSB class
+      // attempting to access a private static in a derived class with the same
+      // name as a private static in this class, which is supposed to fatal at
+      // runtime (for an example see test/quick/static_sprop2.php).
+      auto const selfExact = selfClsExact(env);
+      if (selfExact && tcls.subtypeOf(*selfExact)) {
+        constprop(env);
+      }
+
       return push(env, *ty);
     }
   }
+
   push(env, TInitCell);
 }
 
@@ -760,6 +776,7 @@ void in(ISS& env, const bc::VGetN&) {
                          bc::VGetL { loc });
     }
   }
+  popC(env);
   boxUnknownLocal(env);
   push(env, TRef);
 }
@@ -925,7 +942,18 @@ void in(ISS& env, const bc::InstanceOf& op) {
     return reduce(env, bc::PopC {},
                        bc::InstanceOfD { v1->m_data.pstr });
   }
-  // Ignoring t1-is-an-object case.
+
+  if (t1.strictSubtypeOf(TObj)) {
+    auto const dobj = dobj_of(t1);
+    switch (dobj.type) {
+    case DObj::Sub:
+      break;
+    case DObj::Exact:
+      return reduce(env, bc::PopC {},
+                         bc::InstanceOfD { dobj.cls.name() });
+    }
+  }
+
   popC(env);
   popC(env);
   push(env, TBool);
@@ -1322,7 +1350,7 @@ void in(ISS& env, const bc::FPassN& op) {
     // This could change the type of any local.
     popC(env);
     killLocals(env);
-    return push(env, TGen);
+    return push(env, TInitGen);
   case PrepKind::Val: return reduce(env, bc::CGetN {},
                                          bc::FPassC { op.arg1 });
   case PrepKind::Ref: return reduce(env, bc::VGetN {},
@@ -1357,7 +1385,7 @@ void in(ISS& env, const bc::FPassS& op) {
         }
       }
     }
-    return push(env, TGen);
+    return push(env, TInitGen);
   case PrepKind::Val:
     return reduce(env, bc::CGetS {}, bc::FPassC { op.arg1 });
   case PrepKind::Ref:
@@ -1368,7 +1396,7 @@ void in(ISS& env, const bc::FPassS& op) {
 void in(ISS& env, const bc::FPassV& op) {
   nothrow(env);
   switch (prepKind(env, op.arg1)) {
-  case PrepKind::Unknown: popV(env); return push(env, TGen);
+  case PrepKind::Unknown: popV(env); return push(env, TInitGen);
   case PrepKind::Val:     popV(env); return push(env, TInitCell);
   case PrepKind::Ref:     assert(topT(env).subtypeOf(TRef)); return;
   }
@@ -1377,10 +1405,10 @@ void in(ISS& env, const bc::FPassV& op) {
 void in(ISS& env, const bc::FPassR& op) {
   nothrow(env);
   if (topT(env).subtypeOf(TCell)) return reduce(env, bc::UnboxRNop {},
-                                                      bc::FPassC { op.arg1 });
+                                                     bc::FPassC { op.arg1 });
   if (topT(env).subtypeOf(TRef))  return impl(env, bc::FPassV { op.arg1 });
   switch (prepKind(env, op.arg1)) {
-  case PrepKind::Unknown:      popR(env); return push(env, TGen);
+  case PrepKind::Unknown:      popR(env); return push(env, TInitGen);
   case PrepKind::Val:          popR(env); return push(env, TInitCell);
   case PrepKind::Ref:          popR(env); return push(env, TRef);
   }
@@ -1699,7 +1727,7 @@ void in(ISS& env, const bc::Eval&)      { inclOpImpl(env); }
 
 void in(ISS& env, const bc::DefFunc&)      {}
 void in(ISS& env, const bc::DefCls&)       {}
-void in(ISS& env, const bc::NopDefCls&)    {}
+void in(ISS& env, const bc::DefClsNop&)    {}
 void in(ISS& env, const bc::DefCns&)       { popC(env); push(env, TBool); }
 void in(ISS& env, const bc::DefTypeAlias&) {}
 
@@ -1823,15 +1851,11 @@ void in(ISS& env, const bc::CreateCl& op) {
     for (auto i = uint32_t{0}; i < nargs; ++i) {
       usedVars[nargs - i - 1] = popT(env);
     }
-
-    // TODO(#3363851): this shouldn't be a loop
-    for (auto& c : clsPair.second) {
-      merge_closure_use_vars_into(
-        env.collect.closureUseTypes,
-        c,
-        usedVars
-      );
-    }
+    merge_closure_use_vars_into(
+      env.collect.closureUseTypes,
+      clsPair.second,
+      usedVars
+    );
   }
 
   return push(env, objExact(clsPair.first));

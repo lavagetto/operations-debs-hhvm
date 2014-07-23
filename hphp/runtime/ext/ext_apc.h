@@ -62,6 +62,7 @@ class apcExtension : public Extension {
   static bool UseUncounted;
   static bool Stat;
   static bool EnableCLI;
+  static bool OptimizeSerialization;
 
   virtual void moduleLoad(const IniSetting::Map& ini, Hdf config);
   virtual void moduleInit();
@@ -86,11 +87,11 @@ Variant f_apc_dec(const String& key, int64_t step = 1,
                   VRefParam success = uninit_null(), int64_t cache_id = 0);
 bool f_apc_cas(const String& key, int64_t old_cas, int64_t new_cas,
                int64_t cache_id = 0);
-Variant f_apc_exists(const Variant& key, int64_t cache_id = 0);
+Variant f_apc_exists(const String& cache_type, int64_t cache_id = 0);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant f_apc_cache_info(int64_t cache_id = 0, bool limited = false);
+Variant f_apc_cache_info(const String& cache_type = "", bool limited = false);
 Array f_apc_sma_info(bool limited = false);
 
 ///////////////////////////////////////////////////////////////////////////////

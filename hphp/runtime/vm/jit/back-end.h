@@ -19,6 +19,7 @@
 #include <iosfwd>
 
 #include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/jit/phys-reg.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 
 namespace HPHP { namespace JIT {
@@ -101,7 +102,6 @@ class BackEnd {
                                           CodeBlock& mainCode,
                                           CodeBlock& coldCode,
                                           CodeBlock& frozenCode,
-                                          MCGenerator* mcg,
                                           CodegenState& state) = 0;
   virtual void moveToAlign(CodeBlock& cb,
                            MoveToAlignFlags alignment
@@ -167,7 +167,8 @@ class BackEnd {
    * and return the size of the relocated code (which may be different
    * due to alignment padding, or shrinking branches etc
    */
-  virtual size_t relocate(RelocationInfo& rel, CodeGenFixups& fixups) {
+  virtual size_t relocate(RelocationInfo& rel, CodeBlock& dest,
+                          CodeGenFixups& fixups) {
     always_assert(false);
   }
   /*
@@ -184,7 +185,7 @@ class BackEnd {
    * Adjust the contents of fixups, sr, and asmInfo based on the relocation
    * already performed on rel.
    */
-  virtual void adjustForRelocation(SrcRec* sr, AsmInfo* asmInfo,
+  virtual void adjustForRelocation(AsmInfo* asmInfo,
                                    RelocationInfo& rel, CodeGenFixups& fixups) {
     always_assert(false);
   }

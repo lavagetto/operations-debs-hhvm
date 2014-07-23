@@ -17,7 +17,6 @@
 #ifndef incl_HPHP_APC_STATS_H_
 #define incl_HPHP_APC_STATS_H_
 
-#include "hphp/runtime/base/array-data.h"
 #include "hphp/runtime/base/apc-string.h"
 #include "hphp/util/service-data.h"
 
@@ -26,6 +25,7 @@ namespace HPHP {
 struct APCHandle;
 struct APCArray;
 struct APCObject;
+struct APCCollection;
 struct APCString;
 struct StringData;
 struct ArrayData;
@@ -43,6 +43,7 @@ struct ArrayData;
 size_t getMemSize(const APCHandle*);
 size_t getMemSize(const APCArray*);
 size_t getMemSize(const APCObject*);
+size_t getMemSize(const APCCollection*);
 size_t getMemSize(const ArrayData*);
 
 inline
@@ -66,6 +67,11 @@ size_t getMemSize(const APCString* string) {
  */
 struct APCDetailedStats {
   APCDetailedStats();
+
+  // Return a formatted string with info about APC usage.
+  std::string getStatsInfo() const;
+  // adds stats to the given collection
+  void collectStats(std::map<const StringData*, int64_t>& stats) const;
 
   // A new value was added to APC. This is a fresh value not replacing
   // an existing value. However the key may exists already a be a primed
@@ -104,6 +110,8 @@ private:
   ServiceData::ExportedCounter* m_serObject;
   // Number of APC objects
   ServiceData::ExportedCounter* m_apcObject;
+  // Number of APC collections
+  ServiceData::ExportedCounter* m_apcColl;
 
   /*
    * Operation counters.
@@ -135,6 +143,11 @@ struct APCStats {
 
   APCStats();
   ~APCStats();
+
+  // Return a formatted string with info about APC usage.
+  std::string getStatsInfo() const;
+  // adds stats to the given collection
+  void collectStats(std::map<const StringData*, int64_t>& stats) const;
 
   // A new key is added. Value is added through addAPCValue()
   void addKey(size_t len) {

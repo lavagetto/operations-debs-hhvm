@@ -4,8 +4,14 @@
 <<__Native>>
 function xdebug_break(): bool;
 
-<<__Native>>
-function xdebug_call_class(): string;
+/**
+ * This function returns the name of the class from which the current
+ * function/method was called from.
+ *
+ * @return mixed - Returns the calling class or false if called at the top level
+ */
+<<__Native("NoFCallBuiltin")>>
+function xdebug_call_class(): mixed;
 
 /**
  * This function returns the filename that contains the function/method that
@@ -70,7 +76,13 @@ function xdebug_get_code_coverage(): array<string, array<int, int>>;
 <<__Native>>
 function xdebug_get_collected_errors(bool $clean = false): array<string>;
 
-<<__Native>>
+/**
+ * Returns an array where each element is a variable name which is defined in
+ * the current scope.
+ *
+ * @return array - Returns the declared variables
+ */
+<<__Native("NoFCallBuiltin")>>
 function xdebug_get_declared_vars(): array<string>;
 
 <<__Native>>
@@ -153,6 +165,11 @@ function xdebug_stop_error_collection(): void;
 <<__Native>>
 function xdebug_stop_trace(): void;
 
+/**
+ * Returns the current time index since the starting of the script in seconds.
+ *
+ * @return float - Returns the current time index
+ */
 <<__Native>>
 function xdebug_time_index(): float;
 

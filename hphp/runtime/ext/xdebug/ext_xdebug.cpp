@@ -21,12 +21,29 @@
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/vm/unwind.h"
 #include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/util/timer.h"
 
 namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
 
 static const StaticString s_CALL_FN_MAIN("{main}");
+
+struct XdebugRequestData final : RequestEventHandler {
+  void requestInit() override {
+    m_init_time = Timer::GetCurrentTimeMicros();
+  }
+
+  void requestShutdown() override {
+    m_init_time = 0;
+  }
+
+  int64_t m_init_time;
+};
+
+IMPLEMENT_STATIC_REQUEST_LOCAL(XdebugRequestData, s_request);
+
+///////////////////////////////////////////////////////////////////////////////
 
 /*
  * Returns the frame of the callee's callee. Useful for the xdebug_call_*
@@ -55,8 +72,20 @@ static ActRec *get_call_fp(Offset *off = nullptr) {
 static bool HHVM_FUNCTION(xdebug_break)
   XDEBUG_NOTIMPLEMENTED
 
-static String HHVM_FUNCTION(xdebug_call_class)
-  XDEBUG_NOTIMPLEMENTED
+static Variant HHVM_FUNCTION(xdebug_call_class) {
+  // PHP5 xdebug returns false if the callee is top-level
+  ActRec *fp = get_call_fp();
+  if (fp == nullptr) {
+    return false;
+  }
+
+  // PHP5 xdebug returns "" for no class
+  Class* cls = fp->m_func->cls();
+  if (!cls) {
+    return staticEmptyString();
+  }
+  return String(cls->name()->data(), CopyString);
+}
 
 static String HHVM_FUNCTION(xdebug_call_file) {
   // PHP5 xdebug returns the top-level file if the callee is top-level
@@ -128,8 +157,30 @@ static Array HHVM_FUNCTION(xdebug_get_collected_errors,
                            bool clean /* = false */)
   XDEBUG_NOTIMPLEMENTED
 
-static Array HHVM_FUNCTION(xdebug_get_declared_vars)
-  XDEBUG_NOTIMPLEMENTED
+static const StaticString s_closure_varname("0Closure");
+
+static Array HHVM_FUNCTION(xdebug_get_declared_vars) {
+  // Grab the callee function
+  VMRegAnchor _; // Ensure consistent state for vmfp
+  ActRec* fp = g_context->getPrevVMState(vmfp());
+  assert(fp);
+  const Func* func = fp->func();
+
+  // Add each named local to the returned array. Note that since this function
+  // is supposed to return all _declared_ variables in scope, which includes
+  // variables that have been unset.
+  const Id numNames = func->numNamedLocals();
+  PackedArrayInit vars(numNames);
+  for (Id i = 0; i < numNames; ++i) {
+    assert(func->lookupVarId(func->localVarName(i)) == i);
+    String varname(func->localVarName(i)->data(), CopyString);
+    // Skip the internal closure "0Closure" variable
+    if (!s_closure_varname.equal(varname)) {
+      vars.append(varname);
+    }
+  }
+  return vars.toArray();
+}
 
 static Array HHVM_FUNCTION(xdebug_get_function_stack)
   XDEBUG_NOTIMPLEMENTED
@@ -209,8 +260,10 @@ static void HHVM_FUNCTION(xdebug_stop_error_collection)
 static void HHVM_FUNCTION(xdebug_stop_trace)
   XDEBUG_NOTIMPLEMENTED
 
-static double HHVM_FUNCTION(xdebug_time_index)
-  XDEBUG_NOTIMPLEMENTED
+static double HHVM_FUNCTION(xdebug_time_index) {
+  int64_t micro = Timer::GetCurrentTimeMicros() - s_request->m_init_time;
+  return micro * 1.0e-6;
+}
 
 static TypedValue* HHVM_FN(xdebug_var_dump)(ActRec* ar)
   XDEBUG_NOTIMPLEMENTED
@@ -285,6 +338,18 @@ void XDebugExtension::moduleInit() {
   HHVM_FE(xdebug_time_index);
   HHVM_FE(xdebug_var_dump);
   loadSystemlib("xdebug");
+}
+
+void XDebugExtension::requestInit() {
+  if (Enable) {
+    s_request->requestInit();
+  }
+}
+
+void XDebugExtension::requestShutdown() {
+  if (Enable) {
+    s_request->requestShutdown();
+  }
 }
 
 // Non-bind config options and edge-cases

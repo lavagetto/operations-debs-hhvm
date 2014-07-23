@@ -37,7 +37,6 @@
 #include "hphp/runtime/vm/jit/phys-reg.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/runtime/vm/jit/types.h"
-#include "hphp/runtime/vm/jit/runtime-type.h"
 #include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/base/types.h"
@@ -321,6 +320,12 @@ O(LtInt,                       D(Bool), S(Int) S(Int),                     C) \
 O(LteInt,                      D(Bool), S(Int) S(Int),                     C) \
 O(EqInt,                       D(Bool), S(Int) S(Int),                     C) \
 O(NeqInt,                      D(Bool), S(Int) S(Int),                     C) \
+O(GtDbl,                       D(Bool), S(Dbl) S(Dbl),                     C) \
+O(GteDbl,                      D(Bool), S(Dbl) S(Dbl),                     C) \
+O(LtDbl,                       D(Bool), S(Dbl) S(Dbl),                     C) \
+O(LteDbl,                      D(Bool), S(Dbl) S(Dbl),                     C) \
+O(EqDbl,                       D(Bool), S(Dbl) S(Dbl),                     C) \
+O(NeqDbl,                      D(Bool), S(Dbl) S(Dbl),                     C) \
 O(Floor,                        D(Dbl), S(Dbl),                            C) \
 O(Ceil,                         D(Dbl), S(Dbl),                            C) \
 O(InstanceOfBitmask,           D(Bool), S(Cls) CStr,                       C) \
@@ -574,6 +579,7 @@ O(DecRef,                           ND, S(Gen),                  NNT|E|K|CRc) \
 O(DecRefNZ,                         ND, S(Gen),                        E|CRc) \
 O(DecRefMem,                        ND, S(PtrToGen)                           \
                                           C(Int),                  NNT|E|CRc) \
+O(TakeRef,                          ND, S(Gen),                           NF) \
 O(DefLabel,                     DMulti, NA,                                E) \
 O(DefInlineFP,             D(FramePtr), S(StkPtr) S(StkPtr) S(FramePtr),  NF) \
 O(InlineReturn,                     ND, S(FramePtr),                       E) \
@@ -651,12 +657,12 @@ O(StContArKey,                      ND, S(FramePtr) S(Gen),            E|CRc) \
 O(StAsyncArRaw,                     ND, S(FramePtr)                           \
                                           S(Int,TCA,Nullptr),              E) \
 O(StAsyncArResult,                  ND, S(FramePtr) S(Cell),           E|CRc) \
-O(LdAsyncArFParent,     D(Obj|Nullptr), S(FramePtr),                      NF) \
+O(LdAsyncArParentChain,         D(ABC), S(FramePtr),                      NF) \
 O(AFWHBlockOn,                      ND, S(FramePtr) S(Obj),            E|CRc) \
 O(LdWHState,                    D(Int), S(Obj),                           NF) \
 O(LdWHResult,                  D(Cell), S(Obj),                           NF) \
 O(LdAFWHActRec,                 DParam, S(Obj),                            C) \
-O(LdResumableArObj,             D(Obj), S(FramePtr),                   C|PRc) \
+O(LdResumableArObj,             D(Obj), S(FramePtr),                       C) \
 O(CreateAFWH,                   D(Obj), S(FramePtr)                           \
                                           C(Int)                              \
                                           S(TCA,Nullptr)                      \
@@ -664,7 +670,7 @@ O(CreateAFWH,                   D(Obj), S(FramePtr)                           \
                                           S(Obj),             E|Er|N|CRc|PRc) \
 O(CreateSSWH,                   D(Obj), S(Cell),                 NNT|CRc|PRc) \
 O(AFWHPrepareChild,                 ND, S(FramePtr) S(Obj),           E|Er|N) \
-O(BWHUnblockChain,                  ND, S(Obj,Nullptr),                E|NNT) \
+O(ABCUnblock,                       ND, S(ABC),                        E|NNT) \
 O(IterInit,                    D(Bool), S(Arr,Obj)                            \
                                           S(FramePtr),            Er|E|N|CRc) \
 O(IterInitK,                   D(Bool), S(Arr,Obj)                            \
@@ -690,8 +696,7 @@ O(DecodeCufIter,               D(Bool), S(Arr,Obj,Str)                        \
 O(CIterFree,                        ND, S(FramePtr),                   E|NNT) \
 O(DefMIStateBase,         D(PtrToCell), NA,                               NF) \
 O(BaseG,                   D(PtrToGen), C(TCA)                                \
-                                          S(Str)                              \
-                                          S(PtrToCell),               E|N|Er) \
+                                          S(Str),                     E|N|Er) \
 O(PropX,                   D(PtrToGen), C(TCA)                                \
                                           C(Cls)                              \
                                           S(Obj,PtrToGen)                     \
@@ -857,7 +862,7 @@ O(IncStat,                          ND, C(Int) C(Int) C(Bool),             E) \
 O(TypeProfileFunc,                  ND, S(Gen) S(Func),                E|NNT) \
 O(ProfileArray,                     ND, S(Arr),                            E) \
 O(IncStatGrouped,                   ND, CStr CStr C(Int),                E|N) \
-O(RBTrace,                          ND, NA,                              E|N) \
+O(RBTrace,                          ND, NA,                            E|NNT) \
 O(IncTransCounter,                  ND, NA,                                E) \
 O(IncProfCounter,                   ND, NA,                                E) \
 O(Count,                        D(Int), S(Cell),                        N|Er) \
@@ -913,6 +918,16 @@ bool isIntQueryOp(Opcode opc);
  * Return the int-query opcode for the given non-int-query opcode
  */
 Opcode queryToIntQueryOp(Opcode opc);
+
+/*
+ * Return true if opc is a dbl comparison operator
+ */
+bool isDblQueryOp(Opcode opc);
+
+/*
+ * Return the dbl-query opcode for the given non-dbl-query opcode
+ */
+Opcode queryToDblQueryOp(Opcode opc);
 
 /*
  * A "fusable query op" is any instruction returning Type::Bool that

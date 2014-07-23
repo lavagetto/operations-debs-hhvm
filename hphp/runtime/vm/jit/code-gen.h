@@ -33,11 +33,6 @@ enum class SyncOptions {
   kSmashableAndSyncPoint,
 };
 
-// Returned information from cgCallHelper
-struct CallHelperInfo {
-  TCA returnAddress;
-};
-
 // Information about where code was generated, for pretty-printing.
 struct AsmInfo {
   explicit AsmInfo(const IRUnit& unit)
@@ -123,9 +118,9 @@ struct CodegenState {
 
 LiveRegs computeLiveRegs(const IRUnit& unit, const RegAllocInfo& regs);
 
-void genCode(IRUnit&                 unit,
-             MCGenerator*            mcg,
-             const RegAllocInfo&     regs);
+// Allocate registers and generate machine code. Mutates the global
+// singleton MCGenerator (adds code, allocates data, adds fixups).
+void genCode(IRUnit&);
 
 struct CodeGenerator {
   virtual ~CodeGenerator() {}

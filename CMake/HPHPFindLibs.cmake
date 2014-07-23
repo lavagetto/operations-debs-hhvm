@@ -135,6 +135,41 @@ add_definitions(${LIBXSLT_DEFINITIONS})
 find_package(EXPAT REQUIRED)
 include_directories(${EXPAT_INCLUDE_DIRS})
 
+# libsqlite3
+find_package(LibSQLite)
+if (LIBSQLITE_INCLUDE_DIR)
+  include_directories(${LIBSQLITE_INCLUDE_DIR})
+endif ()
+
+# libdouble-conversion
+find_package(DoubleConversion)
+if (DOUBLE_CONVERSION_INCLUDE_DIR)
+  include_directories(${DOUBLE_CONVERSION_INCLUDE_DIR})
+endif ()
+
+# liblz4
+find_package(LZ4)
+if (LZ4_INCLUDE_DIR)
+  include_directories(${LZ4_INCLUDE_DIR})
+endif()
+
+# libzip
+find_package(LibZip)
+if (LIBZIP_INCLUDE_DIR_ZIP AND LIBZIP_INCLUDE_DIR_ZIPCONF)
+  if (LIBZIP_VERSION VERSION_LESS "0.11")
+    unset(LIBZIP_FOUND CACHE)
+    unset(LIBZIP_LIBRARY CACHE)
+    unset(LIBZIP_INCLUDE_DIR_ZIP CACHE)
+    unset(LIBZIP_INCLUDE_DIR_ZIPCONF CACHE)
+    message(STATUS "libzip is too old, found ${LIBZIP_VERSION} and we need 0.11+, using third-party bundled libzip")
+  else ()
+    include_directories(${LIBZIP_INCLUDE_DIR_ZIP} ${LIBZIP_INCLUDE_DIR_ZIPCONF})
+    message(STATUS "Found libzip: ${LIBZIP_LIBRARY} ${LIBZIP_VERSION}")
+  endif ()
+else ()
+  message(STATUS "Using third-party bundled libzip")
+endif()
+
 # ICU
 find_package(ICU REQUIRED)
 if (ICU_FOUND)
@@ -279,8 +314,11 @@ endif()
 
 find_package(LibDwarf REQUIRED)
 include_directories(${LIBDWARF_INCLUDE_DIRS})
-if (LIBDWARF_HAVE_ENCODE_LEB128)
-  add_definitions("-DHAVE_LIBDWARF_20130729")
+if (LIBDWARF_CONST_NAME)
+  add_definitions("-DLIBDWARF_CONST_NAME")
+endif()
+if (LIBDWARF_USE_INIT_C)
+  add_definitions("-DLIBDWARF_USE_INIT_C")
 endif()
 
 find_package(LibElf REQUIRED)
@@ -373,6 +411,9 @@ macro(hphp_link target)
   target_link_libraries(${target} ${LIBEVENT_LIB})
   target_link_libraries(${target} ${CURL_LIBRARIES})
   target_link_libraries(${target} ${LIBGLOG_LIBRARY})
+  if (LIBJSONC_LIBRARY)
+    target_link_libraries(${target} ${LIBJSONC_LIBRARY})
+  endif()
 
   if (LibXed_LIBRARY)
     target_link_libraries(${target} ${LibXed_LIBRARY})
@@ -385,7 +426,6 @@ macro(hphp_link target)
   if (LIBICONV_LIBRARY)
     target_link_libraries(${target} ${LIBICONV_LIBRARY})
   endif()
-
 
   if (LINUX)
     target_link_libraries(${target} ${CAP_LIB})
@@ -427,7 +467,7 @@ macro(hphp_link target)
   if (LIBUODBC_LIBRARIES)
     target_link_libraries(${target} ${LIBUODBC_LIBRARIES})
   endif()
-
+ 
   target_link_libraries(${target} ${LDAP_LIBRARIES})
   target_link_libraries(${target} ${LBER_LIBRARIES})
 
@@ -439,13 +479,33 @@ macro(hphp_link target)
     target_link_libraries(${target} ${RT_LIB})
   endif()
 
+  if (LIBSQLITE3_LIBRARY)
+    target_link_libraries(${target} ${LIBSQLITE3_LIBRARY})
+  else()
+    target_link_libraries(${target} sqlite3)
+  endif()
+  
+  if (DOUBLE_CONVERSION_LIBRARY)
+    target_link_libraries(${target} ${DOUBLE_CONVERSION_LIBRARY})
+  else() 
+    target_link_libraries(${target} double-conversion)
+  endif()
+
+  if (LZ4_LIBRARY)
+    target_link_libraries(${target} ${LZ4_LIBRARY})
+  else()
+    target_link_libraries(${target} lz4)
+  endif()
+  
+  if (LIBZIP_LIBRARY)
+    target_link_libraries(${target} ${LIBZIP_LIBRARY})
+  else()
+    target_link_libraries(${target} zip_static)
+  endif()
+
   target_link_libraries(${target} fastlz)
   target_link_libraries(${target} timelib)
-  target_link_libraries(${target} sqlite3)
-  target_link_libraries(${target} lz4)
-  target_link_libraries(${target} double-conversion)
   target_link_libraries(${target} folly)
-  target_link_libraries(${target} zip_static)
 
   target_link_libraries(${target} afdt)
   target_link_libraries(${target} mbfl)
