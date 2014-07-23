@@ -38,8 +38,11 @@ static StaticString s_name("name");
 static StaticString s_return("return");
 
 // implemented in runtime/ext/ext_hotprofiler.cpp
-extern void begin_profiler_frame(Profiler *p, const char *symbol);
-extern void end_profiler_frame(Profiler *p, const char *symbol);
+extern void begin_profiler_frame(Profiler *p,
+                                 const char *symbol);
+extern void end_profiler_frame(Profiler *p,
+                               const TypedValue *retval,
+                               const char *symbol);
 
 void EventHook::Enable() {
   ThreadInfo::s_threadInfo->m_reqInjectionData.setEventHookFlag();
@@ -268,13 +271,11 @@ void EventHook::onFunctionEnter(const ActRec* ar, int funcType, ssize_t flags) {
     if (shouldRunUserProfiler(ar->func())) {
       runUserProfilerOnFunctionEnter(ar);
     }
-#ifdef HOTPROFILER
     Profiler* profiler = ThreadInfo::s_threadInfo->m_profiler;
     if (profiler != nullptr) {
       begin_profiler_frame(profiler,
                            GetFunctionNameForProfiler(ar->func(), funcType));
     }
-#endif
   }
 }
 
@@ -291,17 +292,16 @@ void EventHook::onFunctionExit(const ActRec* ar, const TypedValue* retval,
   // side exit in an inlined callee, we want to make sure to skip the exit
   // event to avoid unbalancing the call stack.
   if ((flags & RequestInjectionData::EventHookFlag) &&
-      (JIT::TCA)ar->m_savedRip != JIT::tx->uniqueStubs.retInlHelper) {
-#ifdef HOTPROFILER
+      (JIT::TCA)ar->m_savedRip != JIT::mcg->tx().uniqueStubs.retInlHelper) {
     Profiler* profiler = ThreadInfo::s_threadInfo->m_profiler;
     if (profiler != nullptr) {
       // NB: we don't have a function type flag to match what we got in
       // onFunctionEnter. That's okay, though... we tolerate this in
       // TraceProfiler.
       end_profiler_frame(profiler,
+                         retval,
                          GetFunctionNameForProfiler(ar->func(), NormalFunc));
     }
-#endif
 
     if (shouldRunUserProfiler(ar->func())) {
       if (ThreadInfo::s_threadInfo->m_pendingException != nullptr) {

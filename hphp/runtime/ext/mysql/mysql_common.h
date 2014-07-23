@@ -201,10 +201,7 @@ public:
   virtual const String& o_getClassNameHook() const { return classnameof(); }
 
   void close() {
-    if (m_res) {
-      mysql_free_result(m_res);
-      m_res = NULL;
-    }
+    sweep();
     if (isLocalized()) {
       m_rows.clear();
     }
@@ -331,6 +328,7 @@ public:
   Variant reset();
   Variant result_metadata();
   Variant send_long_data(int64_t param_idx, const String& data);
+  Variant sqlstate();
   Variant store_result();
 
 protected:

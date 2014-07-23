@@ -25,6 +25,7 @@
 #include "hphp/runtime/vm/jit/translator-runtime.h"
 #include "hphp/runtime/vm/jit/ir.h"
 #include "hphp/runtime/vm/jit/arg-group.h"
+#include "hphp/runtime/ext/asio/asio_blockable.h"
 #include "hphp/runtime/ext/asio/async_function_wait_handle.h"
 #include "hphp/runtime/ext/asio/static_wait_handle.h"
 #include "hphp/runtime/ext/ext_array.h"
@@ -264,11 +265,11 @@ static CallMap s_callMap {
                            {{TV, 0}}},
     {AFWHPrepareChild,   &c_AsyncFunctionWaitHandle::PrepareChild, DSSA, SSync,
                            {{SSA, 0}, {SSA, 1}}},
-    {BWHUnblockChain,    &c_BlockableWaitHandle::UnblockChain, DSSA, SNone,
+    {ABCUnblock,         &AsioBlockableChain::Unblock, DSSA, SNone,
                            {{SSA, 0}}},
 
     /* MInstrTranslator helpers */
-    {BaseG,    fssa(0), DSSA, SSync, {{TV, 1}, {SSA, 2}}},
+    {BaseG,    fssa(0), DSSA, SSync, {{TV, 1}}},
     {PropX,    fssa(0), DSSA, SSync,
                  {{SSA, 1}, {SSA, 2}, {TV, 3}, {SSA, 4}}},
     {PropDX,   fssa(0), DSSA, SSync,

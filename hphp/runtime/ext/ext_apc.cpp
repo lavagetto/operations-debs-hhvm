@@ -96,6 +96,8 @@ void apcExtension::moduleLoad(const IniSetting::Map& ini, Hdf config) {
 
   UseUncounted = Config::GetBool(ini, apc["MemModelTreadmill"],
                                  RuntimeOption::ServerExecutionMode());
+  OptimizeSerialization =
+      Config::GetBool(ini, apc["OptimizeSerialization"], true);
 
   IniSetting::Bind(this, IniSetting::PHP_INI_SYSTEM, "apc.enabled", &Enable);
   IniSetting::Bind(this, IniSetting::PHP_INI_SYSTEM, "apc.stat",
@@ -146,6 +148,7 @@ bool apcExtension::ConcurrentTableLockFree = false;
 bool apcExtension::FileStorageKeepFileLinked = false;
 std::vector<std::string> apcExtension::NoTTLPrefix;
 bool apcExtension::UseUncounted = false;
+bool apcExtension::OptimizeSerialization = true;
 bool apcExtension::Stat = true;
 // Different from zend default but matches what we've been returning for years
 bool apcExtension::EnableCLI = true;
@@ -390,11 +393,55 @@ Variant f_apc_exists(const Variant& key, int64_t cache_id /* = 0 */) {
   return s_apc_store[cache_id].exists(key.toString());
 }
 
-const StaticString s_start_time("start_time");
 
-Variant f_apc_cache_info(int64_t cache_id /* = 0 */,
+const StaticString s_user("user");
+const StaticString s_start_time("start_time");
+const StaticString s_ttl("ttl");
+const StaticString s_cache_list("cache_list");
+const StaticString s_entry_name("entry_name");
+const StaticString s_in_memory("in_memory");
+const StaticString s_mem_size("mem_size");
+const StaticString s_type("type");
+
+// This is a guess to the size of the info array. It is significantly
+// bigger than what we need but hard to control all the info that we
+// may want to add here.
+// Try to keep it such that we do not have to resize the array
+const uint32_t kCacheInfoSize = 40;
+// Number of elements in the entry array
+const int32_t kEntryInfoSize = 5;
+
+Variant f_apc_cache_info(const String& cache_type,
                          bool limited /* = false */) {
-  return make_map_array(s_start_time, start_time());
+  ArrayInit info(kCacheInfoSize, ArrayInit::Map{});
+  info.add(s_start_time, start_time());
+  if (cache_type.size() != 0 && !cache_type.same(s_user)) {
+    return info.toArray();
+  }
+
+  info.add(s_ttl, apcExtension::TTLLimit);
+
+  std::map<const StringData*, int64_t> stats;
+  APCStats::getAPCStats().collectStats(stats);
+  for (auto it = stats.begin(); it != stats.end(); it++) {
+    info.add(Variant(it->first, Variant::StaticStrInit{}), it->second);
+  }
+  if (!limited) {
+    std::vector<EntryInfo> entries;
+    s_apc_store[0].getEntriesInfo(entries);
+    PackedArrayInit ents(entries.size());
+    for (auto& entry: entries) {
+      ArrayInit ent(kEntryInfoSize, ArrayInit::Map{});
+      ent.add(s_entry_name, StringData::Make(entry.key));
+      ent.add(s_in_memory, entry.inMem);
+      ent.add(s_ttl, entry.ttl);
+      ent.add(s_mem_size, entry.size);
+      ent.add(s_type, static_cast<int64_t>(entry.type));
+      ents.append(ent.toArray());
+    }
+    info.add(s_cache_list, ents.toArray(), false);
+  }
+  return info.toArray();
 }
 
 Array f_apc_sma_info(bool limited /* = false */) {

@@ -143,9 +143,9 @@ struct IfCountNotStatic {
 
 
 void emitTransCounterInc(Asm& a) {
-  if (!tx->isTransDBEnabled()) return;
+  if (!mcg->tx().isTransDBEnabled()) return;
 
-  a.    movq (tx->getTransCounterAddr(), rAsm);
+  a.    movq (mcg->tx().getTransCounterAddr(), rAsm);
   a.    lock ();
   a.    incq (*rAsm);
 }
@@ -181,14 +181,14 @@ void emitIncRefGenericRegSafe(Asm& as, PhysReg base, int disp, PhysReg tmpReg) {
 }
 
 void emitAssertFlagsNonNegative(Asm& as) {
-  ifThen(as, CC_NGE, [&] { as.ud2(); });
+  ifThen(as, CC_NGE, [&](Asm& a) { a.ud2(); });
 }
 
 void emitAssertRefCount(Asm& as, PhysReg base) {
   as.cmpl(HPHP::StaticValue, base[FAST_REFCOUNT_OFFSET]);
-  ifThen(as, CC_NLE, [&] {
-    as.cmpl(HPHP::RefCountMaxRealistic, base[FAST_REFCOUNT_OFFSET]);
-    ifThen(as, CC_NBE, [&] { as.ud2(); });
+  ifThen(as, CC_NLE, [&](Asm& a) {
+    a.cmpl(HPHP::RefCountMaxRealistic, base[FAST_REFCOUNT_OFFSET]);
+    ifThen(a, CC_NBE, [&](Asm& a) { a.ud2(); });
   });
 }
 
@@ -240,23 +240,17 @@ void emitLdClsCctx(Asm& as, PhysReg srcReg, PhysReg dstReg) {
 }
 
 void emitCall(Asm& a, TCA dest) {
-  if (a.jmpDeltaFits(dest) && !Stats::enabled()) {
+  if (a.jmpDeltaFits(dest)) {
     a.    call(dest);
   } else {
-    dest = mcg->getNativeTrampoline(dest);
-    if (a.jmpDeltaFits(dest)) {
-      a.call(dest);
-    } else {
-      // can't do a near call; store address in data section.
-      // call by loading the address using rip-relative addressing.  This
-      // assumes the data section is near the current code section.  Since
-      // this sequence is directly in-line, rip-relative like this is
-      // more compact than loading a 64-bit immediate.
-      TCA* addr = mcg->allocData<TCA>(sizeof(TCA), 1);
-      *addr = dest;
-      a.call(rip[(intptr_t)addr]);
-      assert(((int32_t*)a.frontier())[-1] + a.frontier() == (TCA)addr);
-    }
+    // can't do a near call; store address in data section.
+    // call by loading the address using rip-relative addressing.  This
+    // assumes the data section is near the current code section.  Since
+    // this sequence is directly in-line, rip-relative like this is
+    // more compact than loading a 64-bit immediate.
+    auto addr = mcg->allocLiteral((uint64_t)dest);
+    a.call(rip[(intptr_t)addr]);
+    assert(((int32_t*)a.frontier())[-1] + a.frontier() == (TCA)addr);
   }
 }
 
@@ -290,6 +284,15 @@ void emitCall(Asm& a, CppCall call) {
   not_reached();
 }
 
+void emitImmStoreq(Asm& as, Immed64 imm, MemoryRef ref) {
+  if (imm.fits(sz::dword)) {
+    as.storeq(imm.l(), ref); // sign-extend to 64-bit then storeq
+  } else {
+    as.storel(int32_t(imm.q()), ref);
+    as.storel(int32_t(imm.q() >> 32), MemoryRef(ref.r + 4));
+  }
+}
+
 void emitJmpOrJcc(Asm& a, ConditionCode cc, TCA dest) {
   if (cc == CC_None) {
     a.   jmp(dest);
@@ -300,12 +303,11 @@ void emitJmpOrJcc(Asm& a, ConditionCode cc, TCA dest) {
 
 void emitRB(X64Assembler& a,
             Trace::RingBufferType t,
-            const char* msg,
-            RegSet toSave) {
+            const char* msg) {
   if (!Trace::moduleEnabledRelease(Trace::ringbuffer, 1)) {
     return;
   }
-  PhysRegSaver save(a, toSave | kSpecialCrossTraceRegs);
+  PhysRegSaver save(a, kSpecialCrossTraceRegs);
   int arg = 0;
   a.    emitImmReg((uintptr_t)msg, argNumToRegName[arg++]);
   a.    emitImmReg(strlen(msg), argNumToRegName[arg++]);
@@ -339,16 +341,63 @@ void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& coldCode,
   a.  jnz  (coldCode.frontier());
 
   acold.  movq  (rVmFp, argNumToRegName[0]);
-  emitCall(acold, tx->uniqueStubs.functionEnterHelper);
+  emitCall(acold, mcg->tx().uniqueStubs.functionEnterHelper);
   mcg->recordSyncPoint(coldCode.frontier(),
                        fixup.m_pcOffset, fixup.m_spOffset);
   acold.  jmp   (mainCode.frontier());
 }
 
-template<class Mem>
-void emitCmpClass(Asm& as, Reg64 reg, Mem mem) {
-  auto size = sizeof(LowClassPtr);
+void emitLoadReg(Asm& as, MemoryRef mem, PhysReg reg) {
+  assert(reg != InvalidReg);
+  if (reg.isGP()) {
+    as. loadq(mem, reg);
+  } else {
+    as. movsd(mem, reg);
+  }
+}
 
+void emitStoreReg(Asm& as, PhysReg reg, MemoryRef mem) {
+  assert(reg != InvalidReg);
+  if (reg.isGP()) {
+    as. storeq(reg, mem);
+  } else {
+    as. movsd(reg, mem);
+  }
+}
+
+void emitLdLowPtr(Asm& as, MemoryRef mem, PhysReg reg, size_t size) {
+  assert(reg != InvalidReg && reg.isGP());
+  if (size == 8) {
+    as.loadq(mem, reg);
+  } else if (size == 4) {
+    as.loadl(mem, r32(reg));
+  } else {
+    not_implemented();
+  }
+}
+
+void emitCmpClass(Asm& as, const Class* c, MemoryRef mem) {
+  auto size = sizeof(LowClassPtr);
+  auto imm = Immed64(c);
+
+  if (size == 8) {
+    if (imm.fits(sz::dword)) {
+      as.cmpq(imm.l(), mem);
+    } else {
+      // Use a scratch.  We could do this without rAsm using two immediate
+      // 32-bit compares (and two branches).
+      as.emitImmReg(imm, rAsm);
+      as.cmpq(rAsm, mem);
+    }
+  } else if (size == 4) {
+    as.cmpl(imm.l(), mem);
+  } else {
+    not_implemented();
+  }
+}
+
+void emitCmpClass(Asm& as, Reg64 reg, MemoryRef mem) {
+  auto size = sizeof(LowClassPtr);
   if (size == 8) {
     as.   cmpq    (reg, mem);
   } else if (size == 4) {
@@ -357,8 +406,6 @@ void emitCmpClass(Asm& as, Reg64 reg, Mem mem) {
     not_implemented();
   }
 }
-
-template void emitCmpClass<MemoryRef>(Asm& as, Reg64 reg, MemoryRef mem);
 
 void emitCmpClass(Asm& as, Reg64 reg1, PhysReg reg2) {
   auto size = sizeof(LowClassPtr);

@@ -2553,8 +2553,9 @@ void EmitterVisitor::visit(FileScopePtr file) {
                 StringData *name;
                 TypedValue tv;
                 if (func->isSimpleDefine(&name, &tv)) {
-                  UnitMergeKind k = func->isDefineWithoutImpl(ar) ?
-                    UnitMergeKindPersistentDefine : UnitMergeKindDefine;
+                  auto k = func->isDefineWithoutImpl(ar)
+                    ? Unit::MergeKind::PersistentDefine
+                    : Unit::MergeKind::Define;
                   if (tv.m_type == KindOfUninit) {
                     tv.m_type = KindOfNull;
                   }
@@ -2570,7 +2571,7 @@ void EmitterVisitor::visit(FileScopePtr file) {
                 StringData *name;
                 TypedValue tv;
                 if (ae->isSimpleGlobalAssign(&name, &tv)) {
-                  m_ue.pushMergeableDef(UnitMergeKindGlobal, name, tv);
+                  m_ue.pushMergeableDef(Unit::MergeKind::Global, name, tv);
                   visit(s);
                   continue;
                 }
@@ -2585,9 +2586,8 @@ void EmitterVisitor::visit(FileScopePtr file) {
                       FunctionScopeRawPtr ps DEBUG_ONLY =
                         sl->getFunctionScope();
                       assert(ps && ps->inPseudoMain());
-                      UnitMergeKind kind = UnitMergeKindReqDoc;
                       m_ue.pushMergeableInclude(
-                        kind,
+                        Unit::MergeKind::ReqDoc,
                         makeStaticString(inc->includePath()));
                       visit(s);
                       continue;
@@ -4812,8 +4812,11 @@ bool EmitterVisitor::visitImpl(ConstructPtr node) {
         const Location* sLoc = ce->getLocation().get();
         PreClassEmitter* pce = m_ue.newPreClassEmitter(
           ssClsName, PreClass::ClosureHoistable);
+
+        auto const attrs = AttrNoOverride | AttrUnique | AttrPersistent;
+
         pce->init(sLoc->line0, sLoc->line1, m_ue.bcPos(),
-                  AttrUnique | AttrPersistent, parentName, nullptr);
+                  attrs, parentName, nullptr);
 
         // Instance properties---one for each use var, and one for
         // each static local.
@@ -6986,6 +6989,9 @@ bool EmitterVisitor::emitSystemLibVarEnvFunc(Emitter& e,
     emitFuncCall(e, call,
                  "__SystemLib\\extract", call->getParams());
     return true;
+  } else if (call->isCallToFunction("parse_str")) {
+    emitFuncCall(e, call, "__SystemLib\\parse_str", call->getParams());
+    return true;
   } else if (call->isCallToFunction("compact")) {
     emitFuncCall(e, call,
                  "__SystemLib\\compact_sl", call->getParams());
@@ -7484,7 +7490,7 @@ void EmitterVisitor::emitClass(Emitter& e,
     e.DefCls(pce->id());
   } else {
     // To attach the line number to for error reporting.
-    e.NopDefCls(pce->id());
+    e.DefClsNop(pce->id());
   }
   e.setTempLocation(LocationPtr());
   for (int i = firstInterface; i < nInterfaces; ++i) {
@@ -8466,7 +8472,7 @@ static int32_t emitGeneratorMethod(UnitEmitter& ue,
           not_reached();
       }
 
-      // debugBacktrace has off-by-one bug when determining whether we are
+      // Backtrace has off-by-one bug when determining whether we are
       // in returning opcode; add Nop to avoid it
       ue.emitOp(OpNop);
       ue.emitOp(OpRetC);

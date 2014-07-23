@@ -30,9 +30,14 @@
 namespace HPHP {
 namespace JIT {
 
+struct CodeGenFixups;
+
 template<typename T>
 struct GrowableVector {
-  GrowableVector() : m_vec(nullptr) {}
+  GrowableVector() {}
+  GrowableVector(const GrowableVector&) = delete;
+  GrowableVector& operator=(const GrowableVector&) = delete;
+
   size_t size() const {
     return m_vec ? m_vec->m_size : 0;
   }
@@ -89,7 +94,7 @@ private:
       return gv;
     }
   };
-  Impl* m_vec;
+  Impl* m_vec{nullptr};
 };
 
 /*
@@ -172,7 +177,8 @@ struct SrcRec {
   void emitFallbackJump(CodeBlock& cb, ConditionCode cc = CC_None);
   void emitFallbackJumpCustom(CodeBlock& cb, CodeBlock& frozen, SrcKey sk,
                               TransFlags trflags, ConditionCode cc = CC_None);
-  void newTranslation(TCA newStart);
+  void newTranslation(TCA newStart,
+                      GrowableVector<IncomingBranch>& inProgressTailBranches);
   void replaceOldTranslations();
   void addDebuggerGuard(TCA dbgGuard, TCA m_dbgBranchGuardSrc);
   bool hasDebuggerGuard() const { return m_dbgBranchGuardSrc != nullptr; }
@@ -192,16 +198,8 @@ struct SrcRec {
     m_anchorTranslation = anc;
   }
 
-  const GrowableVector<IncomingBranch>& inProgressTailJumps() const {
-    return m_inProgressTailJumps;
-  }
-
   const GrowableVector<IncomingBranch>& incomingBranches() const {
     return m_incomingBranches;
-  }
-
-  void clearInProgressTailJumps() {
-    m_inProgressTailJumps.clear();
   }
 
   /*
@@ -243,7 +241,6 @@ private:
   // can rewrire them to new ones.
   TCA m_anchorTranslation;
   GrowableVector<IncomingBranch> m_tailFallbackJumps;
-  GrowableVector<IncomingBranch> m_inProgressTailJumps;
 
   GrowableVector<TCA> m_translations;
   GrowableVector<IncomingBranch> m_incomingBranches;

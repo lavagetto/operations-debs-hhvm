@@ -177,15 +177,26 @@ FuncAnalysis do_analyze(const Index& index,
    * (i.e. each dv init and the main entry), and all of them count as
    * places the function could be entered, so they all must be visited
    * at least once (add them to incompleteQ).
+   *
+   * If we're entering at a DV-init, all higher parameter locals must
+   * be Uninit.  It is also possible that the DV-init is reachable
+   * from within the function with these parameter locals already
+   * initialized (although the normal php emitter can't do this), but
+   * that case is handled normally when iterating below.
    */
   auto const entryState = entry_state(index, ctx, clsAnalysis, knownArgs);
   if (!knownArgs) {
-    for (auto& param : ctx.func->params) {
-      if (auto const dv = param.dvEntryPoint) {
+    auto const numParams = ctx.func->params.size();
+    for (auto paramId = uint32_t{0}; paramId < numParams; ++paramId) {
+      if (auto const dv = ctx.func->params[paramId].dvEntryPoint) {
         ai.bdata[dv->id].stateIn = entryState;
         incompleteQ.insert(rpoId(dv));
+        for (auto locId = paramId; locId < numParams; ++locId) {
+          ai.bdata[dv->id].stateIn.locals[locId] = TUninit;
+        }
       }
     }
+
     ai.bdata[ctx.func->mainEntry->id].stateIn = entryState;
     incompleteQ.insert(rpoId(ctx.func->mainEntry));
   } else {
@@ -365,13 +376,20 @@ void expand_hni_prop_types(ClassAnalysis& clsAnalysis) {
     if (it == end(propState)) return;
 
     /*
-     * When HardTypeHints isn't on, we don't require the constraints
-     * to actually match, and relax all the HNI types to Gen.  (This
-     * is because extensions may wish to assign to properties after a
-     * typehint guard, which is going to fail without this flag on.)
+     * When HardTypeHints isn't on, or if AllFuncsInterceptable is on, we don't
+     * require the constraints to actually match, and relax all the HNI types
+     * to Gen.
+     *
+     * This is because extensions may wish to assign to properties after a
+     * typehint guard, which is going to fail without this flag on.  Or, with
+     * AllFuncsInterceptable it's very likely that some function calls in
+     * systemlib might not be known to return things matching the property type
+     * hints for some properties.
      */
     auto const hniTy =
-      !options.HardTypeHints ? TGen : from_hni_constraint(prop.typeConstraint);
+      !options.HardTypeHints || options.AllFuncsInterceptable
+        ? TGen
+        : from_hni_constraint(prop.typeConstraint);
     if (it->second.subtypeOf(hniTy)) {
       it->second = hniTy;
       return;

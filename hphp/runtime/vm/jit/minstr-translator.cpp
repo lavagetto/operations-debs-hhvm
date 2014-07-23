@@ -259,6 +259,8 @@ void HhbcTranslator::MInstrTranslator::emit() {
 // Returns a pointer to the base of the current MInstrState struct, or
 // a null pointer if it's not needed.
 SSATmp* HhbcTranslator::MInstrTranslator::genMisPtr() {
+  assert(m_base && "genMisPtr called before emitBaseOp");
+
   if (m_needMIS) {
     return gen(LdMIStateAddr, m_misBase, cns(kReservedRSPSpillSpace));
   } else {
@@ -310,24 +312,25 @@ void HhbcTranslator::MInstrTranslator::checkMIState() {
     return;
   }
 
-  // DataTypeGeneric is used here because if we can't prove anything useful
-  // about the operation, this function doesn't care what the type is.
-  auto baseVal = getBase(DataTypeGeneric);
-  Type baseType = baseVal->type();
-  const bool baseArr = baseType <= Type::Arr;
-  const bool isCGetM = m_ni.mInstrOp() == OpCGetM;
-  const bool isSetM = m_ni.mInstrOp() == OpSetM;
-  const bool isIssetM = m_ni.mInstrOp() == OpIssetM;
-  const bool isUnsetM = m_ni.mInstrOp() == OpUnsetM;
-  const bool isSingle = m_ni.immVecM.size() == 1;
+  Type baseType             = m_base->type().derefIfPtr();
+  const bool baseArr        = baseType <= Type::Arr;
+  const bool isCGetM        = m_ni.mInstrOp() == OpCGetM;
+  const bool isSetM         = m_ni.mInstrOp() == OpSetM;
+  const bool isIssetM       = m_ni.mInstrOp() == OpIssetM;
+  const bool isUnsetM       = m_ni.mInstrOp() == OpUnsetM;
+  const bool isSingle       = m_ni.immVecM.size() == 1;
   const bool unknownOffsets = mInstrHasUnknownOffsets(m_ni, contextClass());
 
   if (baseType.maybeBoxed() && !baseType.isBoxed()) {
     // We don't need to bother with weird base types.
     return;
   }
-  baseType = baseType.unbox();
 
+  // Type::unbox() is a little dangerous since it can be more specific than
+  // what LdRef actually returns, but in all cases where the base value comes
+  // from a LdRef, m_base will be the dest of that LdRef and unbox() will be a
+  // no-op here.
+  baseType = baseType.unbox();
 
   // CGetM or SetM with no unknown property offsets
   const bool simpleProp = !unknownOffsets && (isCGetM || isSetM);
@@ -365,20 +368,26 @@ void HhbcTranslator::MInstrTranslator::checkMIState() {
       simpleArrayIsset || simpleStringOp) {
     setNoMIState();
     if (simpleCollectionGet || simpleCollectionIsset) {
-      constrainBase(TypeConstraint(baseType.getClass()), baseVal);
+      constrainBase(TypeConstraint(baseType.getClass()));
     } else {
-      constrainBase(DataTypeSpecific, baseVal);
+      constrainBase(DataTypeSpecific);
     }
   }
 }
 
 void HhbcTranslator::MInstrTranslator::emitMPre() {
-  checkMIState();
-
   if (HPHP::Trace::moduleEnabled(HPHP::Trace::minstr, 1)) {
     emitMTrace();
   }
 
+  // The base location is input 0 or 1, and the location code is stored
+  // separately from m_ni.immVecM, so input indices (iInd) and member indices
+  // (mInd) commonly differ.  Additionally, W members have no corresponding
+  // inputs, so it is necessary to track the two indices separately.
+  emitBaseOp();
+  ++m_iInd;
+
+  checkMIState();
   if (m_needMIS) {
     m_misBase = gen(DefMIStateBase);
     SSATmp* uninit = cns(Type::Uninit);
@@ -388,13 +397,6 @@ void HhbcTranslator::MInstrTranslator::emitMPre() {
       gen(StMem, m_misBase, cns(MISOFF(tvRef2)), uninit);
     }
   }
-
-  // The base location is input 0 or 1, and the location code is stored
-  // separately from m_ni.immVecM, so input indices (iInd) and member indices
-  // (mInd) commonly differ.  Additionally, W members have no corresponding
-  // inputs, so it is necessary to track the two indices separately.
-  emitBaseOp();
-  ++m_iInd;
 
   // Iterate over all but the last member, which is consumed by a final
   // operation.
@@ -508,20 +510,17 @@ SSATmp* HhbcTranslator::MInstrTranslator::getValAddr() {
   }
 }
 
-void HhbcTranslator::MInstrTranslator::constrainBase(TypeConstraint tc,
-                                                     SSATmp* value) {
-  if (!value) value = m_base;
-
+void HhbcTranslator::MInstrTranslator::constrainBase(TypeConstraint tc) {
   // Member operations only care about the inner type of the base if it's
   // boxed, so this handles the logic of using the inner constraint when
   // appropriate.
-  auto baseType = value->type().derefIfPtr();
+  auto baseType = m_base->type().derefIfPtr();
 
   if (baseType.maybeBoxed()) {
     tc.innerCat = tc.category;
     tc.category = DataTypeCountness;
   }
-  m_irb.constrainValue(value, tc);
+  m_irb.constrainValue(m_base, tc);
 }
 
 SSATmp* HhbcTranslator::MInstrTranslator::getInput(unsigned i,
@@ -587,11 +586,8 @@ void HhbcTranslator::MInstrTranslator::emitBaseLCR() {
   }
 
   // If the base is a box with a type that's changed, we need to bail out of
-  // the tracelet and retranslate. Doing an exit here is a little sketchy since
-  // we may have already emitted instructions with memory effects to initialize
-  // the MInstrState. These particular stores are harmless though, and the
-  // worst outcome here is that we'll end up doing the stores twice, once for
-  // this instruction and once at the beginning of the retranslation.
+  // the tracelet and retranslate. This is the first code emitted for the
+  // minstr so it's ok to side-exit here.
   Block* failedRef = baseType.isBoxed() ? m_ht.makeExit() : nullptr;
   if ((baseType.subtypeOfAny(Type::Obj, Type::BoxedObj) &&
        mcodeIsProp(m_ni.immVecM[0])) ||
@@ -650,7 +646,7 @@ HhbcTranslator::MInstrTranslator::simpleCollectionOp() {
   // constrain the base as appropriate.
 
   SSATmp* base = getInput(m_mii.valCount(), DataTypeGeneric);
-  auto baseType = base->type().unbox();
+  auto baseType = ldRefReturn(base->type().unbox());
   HPHP::Op op = m_ni.mInstrOp();
   bool readInst = (op == OpCGetM || op == OpIssetM);
   if ((op == OpSetM || readInst) &&
@@ -712,8 +708,7 @@ HhbcTranslator::MInstrTranslator::simpleCollectionOp() {
 }
 
 void HhbcTranslator::MInstrTranslator::constrainCollectionOpBase() {
-  auto type = simpleCollectionOp();
-  switch (type) {
+  switch (simpleCollectionOp()) {
     case SimpleOp::None:
       return;
 
@@ -731,7 +726,8 @@ void HhbcTranslator::MInstrTranslator::constrainCollectionOpBase() {
     case SimpleOp::Map:
     case SimpleOp::Pair: {
       SSATmp* base = getInput(m_mii.valCount(), DataTypeGeneric);
-      auto baseType = base->type().unbox();
+      auto baseType = ldRefReturn(base->type().unbox());
+      always_assert(baseType < Type::Obj);
       constrainBase(TypeConstraint(baseType.getClass()));
       return;
     }
@@ -751,7 +747,7 @@ bool HhbcTranslator::MInstrTranslator::isSingleMember() {
 }
 
 void HhbcTranslator::MInstrTranslator::emitBaseH() {
-  m_base = gen(LdThis, m_irb.fp());
+  m_base = getBase(DataTypeSpecific);
 }
 
 void HhbcTranslator::MInstrTranslator::emitBaseN() {
@@ -761,8 +757,7 @@ void HhbcTranslator::MInstrTranslator::emitBaseN() {
 }
 
 template <bool warn, bool define>
-static inline TypedValue* baseGImpl(TypedValue key,
-                                    MInstrState* mis) {
+static inline TypedValue* baseGImpl(TypedValue key) {
   TypedValue* base;
   StringData* name = prepareKey(key);
   SCOPE_EXIT { decRefStr(name); };
@@ -789,26 +784,26 @@ static inline TypedValue* baseGImpl(TypedValue key,
 }
 
 namespace MInstrHelpers {
-TypedValue* baseG(TypedValue key, MInstrState* mis) {
-  return baseGImpl<false, false>(key, mis);
+TypedValue* baseG(TypedValue key) {
+  return baseGImpl<false, false>(key);
 }
 
-TypedValue* baseGW(TypedValue key, MInstrState* mis) {
-  return baseGImpl<true, false>(key, mis);
+TypedValue* baseGW(TypedValue key) {
+  return baseGImpl<true, false>(key);
 }
 
-TypedValue* baseGD(TypedValue key, MInstrState* mis) {
-  return baseGImpl<false, true>(key, mis);
+TypedValue* baseGD(TypedValue key) {
+  return baseGImpl<false, true>(key);
 }
 
-TypedValue* baseGWD(TypedValue key, MInstrState* mis) {
-  return baseGImpl<true, true>(key, mis);
+TypedValue* baseGWD(TypedValue key) {
+  return baseGImpl<true, true>(key);
 }
 }
 
 void HhbcTranslator::MInstrTranslator::emitBaseG() {
   const MInstrAttr& mia = m_mii.getAttr(m_ni.immVec.locationCode());
-  typedef TypedValue* (*OpFunc)(TypedValue, MInstrState*);
+  typedef TypedValue* (*OpFunc)(TypedValue);
   using namespace MInstrHelpers;
   static const OpFunc opFuncs[] = {baseG, baseGW, baseGD, baseGWD};
   OpFunc opFunc = opFuncs[mia & MIA_base];
@@ -818,8 +813,7 @@ void HhbcTranslator::MInstrTranslator::emitBaseG() {
   m_base = gen(BaseG,
                makeEmptyCatch(),
                cns(reinterpret_cast<TCA>(opFunc)),
-               gblName,
-               genMisPtr());
+               gblName);
 }
 
 void HhbcTranslator::MInstrTranslator::emitBaseS() {
@@ -828,12 +822,12 @@ void HhbcTranslator::MInstrTranslator::emitBaseS() {
   SSATmp* clsRef = getInput(kClassIdx, DataTypeGeneric /* will be a Cls */);
 
   /*
-   * Note, the base may be a pointer to a boxed type after this.  We
-   * don't unbox here, because we never are going to generate a
-   * special translation unless we know it's not boxed, and the C++
-   * helpers for generic dims currently always conditionally unbox.
+   * Note, the base may be a pointer to a boxed type after this.  We don't
+   * unbox here, because we never are going to generate a special translation
+   * unless we know it's not boxed, and the C++ helpers for generic dims
+   * currently always conditionally unbox.
    */
-  m_base = m_ht.ldClsPropAddr(makeCatch(), clsRef, key, true);
+  m_base = m_ht.ldClsPropAddr(makeEmptyCatch(), clsRef, key, true);
 }
 
 void HhbcTranslator::MInstrTranslator::emitBaseOp() {
@@ -867,11 +861,42 @@ void HhbcTranslator::MInstrTranslator::emitIntermediateOp() {
   }
 }
 
+PropInfo HhbcTranslator::MInstrTranslator::getCurrentPropertyOffset(
+  const Class*& knownCls
+) {
+  auto info = getPropertyOffset(m_ni, contextClass(), knownCls,
+                                m_mii, m_mInd, m_iInd);
+  if (info.offset == -1) return info;
+
+  auto baseType = m_base->type().derefIfPtr();
+  always_assert_flog(
+    baseType < Type::Obj,
+    "Got property offset for base {} which isn't an object",
+    *m_base->inst()
+  );
+
+  auto baseCls = baseType.getClass();
+
+  // baseCls and knownCls may differ due to a number of factors but they must
+  // always be related to each other somehow.
+  always_assert_flog(
+    baseCls->classof(knownCls) || knownCls->classof(baseCls),
+    "Class mismatch between baseType({}) and knownCls({})",
+    baseCls->name()->data(), knownCls->name()->data()
+  );
+
+  if (m_irb.constrainValue(m_base, TypeConstraint(baseCls).setWeak())) {
+    // We can't use this specialized class without making a guard more
+    // expensive, so don't do it.
+    knownCls = nullptr;
+    return PropInfo{};
+  }
+  return info;
+}
+
 void HhbcTranslator::MInstrTranslator::emitProp() {
   const Class* knownCls = nullptr;
-  const auto propInfo   = getPropertyOffset(m_ni, contextClass(),
-                                            knownCls, m_mii,
-                                            m_mInd, m_iInd);
+  const auto propInfo   = getCurrentPropertyOffset(knownCls);
   auto mia = m_mii.getAttr(m_ni.immVecM[m_mInd]);
   if (propInfo.offset == -1 || (mia & Unset) ||
       mightCallMagicPropMethod(mia, knownCls, propInfo)) {
@@ -1189,36 +1214,48 @@ static const TypedValue* elemArrayNotFound(const StringData* k) {
 
 static inline const TypedValue* checkedGet(ArrayData* a, StringData* key) {
   int64_t i;
-  return UNLIKELY(key->isStrictlyInteger(i)) ? a->nvGet(i) : a->nvGet(key);
+  return UNLIKELY(key->isStrictlyInteger(i))
+    ? a->nvGetConverted(i)
+    : a->nvGet(key);
 }
 
 static inline const TypedValue* checkedGet(ArrayData* a, int64_t key) {
   not_reached();
 }
 
-template<KeyType keyType, bool checkForInt, bool warn>
+template<KeyType keyType, bool checkForInt, bool converted, bool warn>
 static inline const TypedValue* elemArrayImpl(TypedValue* a,
                                               key_type<keyType> key) {
+  static_assert((checkForInt && !converted) || !checkForInt,
+                "Can't both check for integer string and have been converted");
   assert(a->m_type == KindOfArray);
   auto const ad = a->m_data.parr;
+  if (converted) {
+    if (UNLIKELY(ad->isIntMapArray())) {
+      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                            ArrayData::kIntMapKind);
+    }
+  }
   auto const ret = checkForInt ? checkedGet(ad, key)
                                : ad->nvGet(key);
   return ret ? ret : elemArrayNotFound<warn>(key);
 }
 
 #define HELPER_TABLE(m)                                 \
-  /* name               keyType  checkForInt   warn */  \
-  m(elemArrayS,    KeyType::Str,       false, false)    \
-  m(elemArraySi,   KeyType::Str,        true, false)    \
-  m(elemArrayI,    KeyType::Int,       false, false)    \
-  m(elemArraySW,   KeyType::Str,       false,  true)    \
-  m(elemArraySiW,  KeyType::Str,        true,  true)    \
-  m(elemArrayIW,   KeyType::Int,       false,  true)
+  /* name               keyType  checkForInt   converted   warn */  \
+  m(elemArrayS,    KeyType::Str,       false,   false,    false)    \
+  m(elemArraySi,   KeyType::Str,        true,   false,    false)    \
+  m(elemArrayI,    KeyType::Int,       false,   false,    false)    \
+  m(elemArrayIc,   KeyType::Int,       false,    true,    false)    \
+  m(elemArraySW,   KeyType::Str,       false,   false,     true)    \
+  m(elemArraySiW,  KeyType::Str,        true,   false,     true)    \
+  m(elemArrayIW,   KeyType::Int,       false,   false,     true)    \
+  m(elemArrayIWc,  KeyType::Int,       false,    true,     true)
 
-#define ELEM(nm, keyType, checkForInt, warn)                    \
-  const TypedValue* nm(TypedValue* a, key_type<keyType> key) {  \
-    return elemArrayImpl<keyType, checkForInt, warn>(           \
-      a, key);                                                  \
+#define ELEM(nm, keyType, checkForInt, converted, warn)             \
+  const TypedValue* nm(TypedValue* a, key_type<keyType> key) {      \
+    return elemArrayImpl<keyType, checkForInt, converted, warn>(    \
+      a, key);                                                      \
   }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
@@ -1228,10 +1265,11 @@ HELPER_TABLE(ELEM)
 void HhbcTranslator::MInstrTranslator::emitElemArray(SSATmp* key, bool warn) {
   KeyType keyType;
   bool checkForInt;
-  m_ht.checkStrictlyInteger(key, keyType, checkForInt);
+  bool converted;
+  m_ht.checkStrictlyInteger(key, keyType, checkForInt, converted);
 
   typedef TypedValue* (*OpFunc)(ArrayData*, TypedValue*);
-  BUILD_OPTAB(keyType, checkForInt, warn);
+  BUILD_OPTAB(keyType, checkForInt, converted, warn);
   m_base = gen(ElemArray, makeCatch(), cns((TCA)opFunc), m_base, key);
 }
 #undef HELPER_TABLE
@@ -1341,8 +1379,7 @@ HELPER_TABLE(PROP)
 
 void HhbcTranslator::MInstrTranslator::emitCGetProp() {
   const Class* knownCls = nullptr;
-  const auto propInfo   = getPropertyOffset(m_ni, contextClass(), knownCls,
-                                            m_mii, m_mInd, m_iInd);
+  const auto propInfo   = getCurrentPropertyOffset(knownCls);
 
   if (propInfo.offset != -1 &&
       !mightCallMagicPropMethod(None, knownCls, propInfo)) {
@@ -1476,13 +1513,16 @@ void HhbcTranslator::MInstrTranslator::emitSetProp() {
 
   /* If we know the class for the current base, emit a direct property set. */
   const Class* knownCls = nullptr;
-  const auto propInfo   = getPropertyOffset(m_ni, contextClass(), knownCls,
-                                            m_mii, m_mInd, m_iInd);
+  const auto propInfo   = getCurrentPropertyOffset(knownCls);
+
   if (propInfo.offset != -1 &&
       !mightCallMagicPropMethod(Define, knownCls, propInfo)) {
     emitPropSpecialized(MIA_define, propInfo);
-    SSATmp* cellPtr = gen(UnboxPtr, m_base);
-    SSATmp* oldVal = gen(LdMem, Type::Cell, cellPtr, cns(0));
+
+    auto const propTy = convertToType(propInfo.repoAuthType);
+    auto const cellTy = propTy.maybeBoxed() ? propTy.unbox() : propTy;
+    auto const cellPtr = propTy.maybeBoxed() ? gen(UnboxPtr, m_base) : m_base;
+    auto const oldVal = gen(LdMem, cellTy, cellPtr, cns(0));
 
     gen(IncRef, value);
     gen(StMem, cellPtr, cns(0), value);
@@ -1696,8 +1736,14 @@ SSATmp* HhbcTranslator::MInstrTranslator::emitPackedArrayGet(SSATmp* base,
   );
 }
 
-template<KeyType keyType, bool checkForInt>
+template<KeyType keyType, bool checkForInt, bool converted>
 static inline TypedValue arrayGetImpl(ArrayData* a, key_type<keyType> key) {
+  if (converted) {
+    if (UNLIKELY(a->isIntMapArray())) {
+      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                            ArrayData::kIntMapKind);
+    }
+  }
   auto ret = checkForInt ? checkedGet(a, key) : a->nvGet(key);
   if (ret) {
     ret = tvToCell(ret);
@@ -1707,15 +1753,16 @@ static inline TypedValue arrayGetImpl(ArrayData* a, key_type<keyType> key) {
   return arrayGetNotFound(key);
 }
 
-#define HELPER_TABLE(m)                    \
-  /* name        keyType     checkForInt */\
-  m(arrayGetS,   KeyType::Str,   false)    \
-  m(arrayGetSi,  KeyType::Str,    true)    \
-  m(arrayGetI,   KeyType::Int,   false)
+#define HELPER_TABLE(m)                                 \
+  /* name        keyType     checkForInt   converted  */\
+  m(arrayGetS,   KeyType::Str,   false,    false)       \
+  m(arrayGetSi,  KeyType::Str,    true,    false)       \
+  m(arrayGetI,   KeyType::Int,   false,    false)       \
+  m(arrayGetIc,  KeyType::Int,   false,     true)
 
-#define ELEM(nm, keyType, checkForInt)                                  \
+#define ELEM(nm, keyType, checkForInt, converted)                       \
   TypedValue nm(ArrayData* a, key_type<keyType> key) {                  \
-    return arrayGetImpl<keyType, checkForInt>(a, key);                  \
+    return arrayGetImpl<keyType, checkForInt, converted>(a, key);       \
   }
 namespace MInstrHelpers {
 HELPER_TABLE(ELEM)
@@ -1725,10 +1772,11 @@ HELPER_TABLE(ELEM)
 SSATmp* HhbcTranslator::MInstrTranslator::emitArrayGet(SSATmp* key) {
   KeyType keyType;
   bool checkForInt;
-  m_ht.checkStrictlyInteger(key, keyType, checkForInt);
+  bool converted;
+  m_ht.checkStrictlyInteger(key, keyType, checkForInt, converted);
 
   typedef TypedValue (*OpFunc)(ArrayData*, TypedValue*);
-  BUILD_OPTAB(keyType, checkForInt);
+  BUILD_OPTAB(keyType, checkForInt, converted);
   assert(m_base->isA(Type::Arr));
   return gen(ArrayGet, makeCatch(), cns((TCA)opFunc), m_base, key);
 }
@@ -1892,8 +1940,7 @@ HELPER_TABLE(ELEM)
 void HhbcTranslator::MInstrTranslator::emitCGetElem() {
   SSATmp* key = getKey();
 
-  SimpleOp simpleOpType = simpleCollectionOp();
-  switch (simpleOpType) {
+  switch (simpleCollectionOp()) {
   case SimpleOp::Array:
     m_result = emitArrayGet(key);
     break;
@@ -2017,22 +2064,31 @@ void HhbcTranslator::MInstrTranslator::emitPackedArrayIsset() {
     });
 }
 
-template<KeyType keyType, bool checkForInt>
+template<KeyType keyType, bool checkForInt, bool converted>
 static inline uint64_t arrayIssetImpl(ArrayData* a, key_type<keyType> key) {
+  static_assert(!converted || keyType == KeyType::Int,
+                "Should have only been converted if KeyType is now an int");
+  if (converted) {
+    if (UNLIKELY(a->isIntMapArray())) {
+      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                            ArrayData::kIntMapKind);
+    }
+  }
   auto const value = checkForInt ? checkedGet(a, key) : a->nvGet(key);
   if (!value) return 0;
   return !tvAsCVarRef(value).isNull();
 }
 
-#define HELPER_TABLE(m)                         \
-  /* name           keyType       checkForInt */\
-  m(arrayIssetS,    KeyType::Str,   false)      \
-  m(arrayIssetSi,   KeyType::Str,    true)      \
-  m(arrayIssetI,    KeyType::Int,   false)
+#define HELPER_TABLE(m)                                         \
+  /* name           keyType       checkForInt  converted      */\
+  m(arrayIssetS,    KeyType::Str,   false,      false)          \
+  m(arrayIssetSi,   KeyType::Str,    true,      false)          \
+  m(arrayIssetI,    KeyType::Int,   false,      false)          \
+  m(arrayIssetIc,   KeyType::Int,   false,      true)
 
-#define ISSET(nm, keyType, checkForInt)                                 \
+#define ISSET(nm, keyType, checkForInt, converted)                      \
   uint64_t nm(ArrayData* a, key_type<keyType> key) {                    \
-    return arrayIssetImpl<keyType, checkForInt>(a, key);                \
+    return arrayIssetImpl<keyType, checkForInt, converted>(a, key);     \
   }
 namespace MInstrHelpers {
 HELPER_TABLE(ISSET)
@@ -2043,10 +2099,11 @@ void HhbcTranslator::MInstrTranslator::emitArrayIsset() {
   SSATmp* key = getKey();
   KeyType keyType;
   bool checkForInt;
-  m_ht.checkStrictlyInteger(key, keyType, checkForInt);
+  bool converted;
+  m_ht.checkStrictlyInteger(key, keyType, checkForInt, converted);
 
   typedef uint64_t (*OpFunc)(ArrayData*, TypedValue*);
-  BUILD_OPTAB(keyType, checkForInt);
+  BUILD_OPTAB(keyType, checkForInt, converted);
   assert(m_base->isA(Type::Arr));
   m_result = gen(ArrayIsset, makeCatch(), cns((TCA)opFunc), m_base, key);
 }
@@ -2121,8 +2178,7 @@ void HhbcTranslator::MInstrTranslator::emitMapIsset() {
 #undef HELPER_TABLE
 
 void HhbcTranslator::MInstrTranslator::emitIssetElem() {
-  SimpleOp simpleOpType = simpleCollectionOp();
-  switch (simpleOpType) {
+  switch (simpleCollectionOp()) {
   case SimpleOp::Array:
   case SimpleOp::ProfiledArray:
     emitArrayIsset();
@@ -2166,13 +2222,21 @@ static inline ArrayData* uncheckedSet(ArrayData* a,
   return g_array_funcs.setInt[a->kind()](a, key, value, copy);
 }
 
+
+static inline ArrayData* uncheckedSetConverted(ArrayData* a,
+                                               int64_t key,
+                                               Cell value,
+                                               bool copy) {
+  return g_array_funcs.setIntConverted[a->kind()](a, key, value, copy);
+}
+
 static inline ArrayData* checkedSet(ArrayData* a,
                                     StringData* key,
                                     Cell value,
                                     bool copy) {
   int64_t i;
   return UNLIKELY(key->isStrictlyInteger(i))
-    ? uncheckedSet(a, i, value, copy)
+    ? uncheckedSetConverted(a, i, value, copy)
     : uncheckedSet(a, key, value, copy);
 }
 
@@ -2183,7 +2247,7 @@ static inline ArrayData* checkedSet(ArrayData* a,
   not_reached();
 }
 
-template<KeyType keyType, bool checkForInt, bool setRef>
+template<KeyType keyType, bool checkForInt, bool converted, bool setRef>
 static inline typename ShuffleReturn<setRef>::return_type arraySetImpl(
     ArrayData* a, key_type<keyType> key,
     Cell value, RefData* ref) {
@@ -2193,23 +2257,31 @@ static inline typename ShuffleReturn<setRef>::return_type arraySetImpl(
   const bool copy = a->hasMultipleRefs();
   ArrayData* ret = checkForInt ? checkedSet(a, key, value, copy)
                                : uncheckedSet(a, key, value, copy);
+  if (converted) {
+    if (UNLIKELY(ret->isIntMapArray())) {
+      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                            ArrayData::kIntMapKind);
+    }
+  }
 
   return arrayRefShuffle<setRef>(a, ret, setRef ? ref->tv() : nullptr);
 }
 
 #define HELPER_TABLE(m)                                    \
-  /* name        keyType        checkForInt setRef */      \
-  m(arraySetS,   KeyType::Str,   false,     false)         \
-  m(arraySetSi,  KeyType::Str,    true,     false)         \
-  m(arraySetI,   KeyType::Int,   false,     false)         \
-  m(arraySetSR,  KeyType::Str,   false,      true)         \
-  m(arraySetSiR, KeyType::Str,    true,      true)         \
-  m(arraySetIR,  KeyType::Int,   false,      true)
+  /* name        keyType        checkForInt  converted  setRef */       \
+  m(arraySetS,   KeyType::Str,   false,      false,     false)          \
+  m(arraySetSi,  KeyType::Str,    true,      false,     false)          \
+  m(arraySetI,   KeyType::Int,   false,      false,     false)          \
+  m(arraySetIc,  KeyType::Int,   false,       true,     false)          \
+  m(arraySetSR,  KeyType::Str,   false,      false,     true)           \
+  m(arraySetSiR, KeyType::Str,    true,      false,     true)           \
+  m(arraySetIR,  KeyType::Int,   false,      false,     true)           \
+  m(arraySetIRc, KeyType::Int,   false,       true,     true)
 
-#define ELEM(nm, keyType, checkForInt, setRef)                        \
+#define ELEM(nm, keyType, checkForInt, converted, setRef)             \
   typename ShuffleReturn<setRef>::return_type                         \
   nm(ArrayData* a, key_type<keyType> key, Cell value, RefData* ref) { \
-    return arraySetImpl<keyType, checkForInt, setRef>(                \
+    return arraySetImpl<keyType, checkForInt, converted, setRef>(     \
       a, key, value, ref);                                            \
   }
 namespace MInstrHelpers {
@@ -2225,11 +2297,12 @@ void HhbcTranslator::MInstrTranslator::emitArraySet(SSATmp* key,
   assert(value->type().notBoxed());
   KeyType keyType;
   bool checkForInt;
-  m_ht.checkStrictlyInteger(key, keyType, checkForInt);
+  bool converted;
+  m_ht.checkStrictlyInteger(key, keyType, checkForInt, converted);
   const DynLocation& base = *m_ni.inputs[m_mii.valCount()];
-  bool setRef = base.outerType() == KindOfRef;
+  bool setRef = base.rtt.isBoxed();
   typedef ArrayData* (*OpFunc)(ArrayData*, TypedValue*, TypedValue, RefData*);
-  BUILD_OPTAB(keyType, checkForInt, setRef);
+  BUILD_OPTAB(keyType, checkForInt, converted, setRef);
 
   // No catch trace below because the helper can't throw. It may reenter to
   // call destructors so it has a sync point in nativecalls.cpp, but exceptions
@@ -2416,18 +2489,14 @@ void HhbcTranslator::MInstrTranslator::emitSetElem() {
   SSATmp* value = getValue();
   SSATmp* key = getKey();
 
-  SimpleOp simpleOpType = simpleCollectionOp();
-  assert(simpleOpType != SimpleOp::PackedArray);
-  switch (simpleOpType) {
+  switch (simpleCollectionOp()) {
   case SimpleOp::Array:
   case SimpleOp::ProfiledArray:
     emitArraySet(key, value);
     break;
   case SimpleOp::PackedArray:
-    not_reached();
-    break;
   case SimpleOp::String:
-    not_reached();
+    always_assert(false && "Bad SimpleOp in emitSetElem");
     break;
   case SimpleOp::Vector:
     emitVectorSet(key, value);
@@ -2726,11 +2795,11 @@ void HhbcTranslator::MInstrTranslator::prependToTraces(IRInstruction* inst) {
 }
 
 bool HhbcTranslator::MInstrTranslator::needFirstRatchet() const {
-  if (m_ni.inputs[m_mii.valCount()]->valueType() == KindOfArray) {
+  if (m_ni.inputs[m_mii.valCount()]->rtt.unbox() <= Type::Arr) {
     switch (m_ni.immVecM[0]) {
-    case MEC: case MEL: case MET: case MEI: return false;
-    case MPC: case MPL: case MPT: case MW:  return true;
-    default: not_reached();
+      case MEC: case MEL: case MET: case MEI: return false;
+      case MPC: case MPL: case MPT: case MW:  return true;
+      default: not_reached();
     }
   }
   return true;

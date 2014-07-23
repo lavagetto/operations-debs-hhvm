@@ -175,11 +175,7 @@ struct FrameState final : private LocalStateHook {
    */
   void clearCse();
 
-  /*
-   * Check current state for compatibility (matching types of
-   * stack/locals) with the state at block.
-   */
-  bool compatible(Block*);
+  void clearCurrentLocals() { clearLocals(*this); }
 
   const Func* func() const { return m_curFunc; }
   Offset spOffset() const { return m_spOffset; }

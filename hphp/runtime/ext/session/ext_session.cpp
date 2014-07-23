@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <vector>
@@ -773,9 +774,7 @@ private:
       m_fd = ::open(buf, O_CREAT | O_RDWR | O_BINARY, m_filemode);
 
       if (m_fd != -1) {
-#ifdef PHP_WIN32
         flock(m_fd, LOCK_EX);
-#endif
 
 #ifdef F_SETFD
 # ifndef FD_CLOEXEC
@@ -1032,7 +1031,7 @@ public:
       if (key.isString()) {
         String skey = key.toString();
         buf.append(skey);
-        if (skey.find(PS_DELIMITER) >= 0) {
+        if (skey.find(PS_DELIMITER) >= 0 || skey.find(PS_UNDEF_MARKER) >= 0) {
           return String();
         }
         buf.append(PS_DELIMITER);

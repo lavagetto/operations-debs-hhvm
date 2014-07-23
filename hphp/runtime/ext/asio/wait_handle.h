@@ -19,6 +19,7 @@
 #define incl_HPHP_EXT_ASIO_WAIT_HANDLE_H_
 
 #include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/asio/asio_blockable.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -49,7 +50,14 @@ namespace HPHP {
  * passed as an array member of GenArrayWaitHandle).
  */
 FORWARD_DECLARE_CLASS(WaitHandle);
-FORWARD_DECLARE_CLASS(BlockableWaitHandle);
+FORWARD_DECLARE_CLASS(AsyncFunctionWaitHandle);
+FORWARD_DECLARE_CLASS(AsyncGeneratorWaitHandle);
+FORWARD_DECLARE_CLASS(GenArrayWaitHandle);
+FORWARD_DECLARE_CLASS(GenMapWaitHandle);
+FORWARD_DECLARE_CLASS(GenVectorWaitHandle);
+FORWARD_DECLARE_CLASS(RescheduleWaitHandle);
+FORWARD_DECLARE_CLASS(SleepWaitHandle);
+FORWARD_DECLARE_CLASS(ExternalThreadEventWaitHandle);
 class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle> {
  public:
   DECLARE_CLASS_NO_SWEEP(WaitHandle)
@@ -125,6 +133,15 @@ class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle> {
     m_ctxVecIndex = idx;
   }
 
+  c_AsyncFunctionWaitHandle* asAsyncFunction();
+  c_AsyncGeneratorWaitHandle* asAsyncGenerator();
+  c_GenArrayWaitHandle* asGenArray();
+  c_GenMapWaitHandle* asGenMap();
+  c_GenVectorWaitHandle* asGenVector();
+  c_RescheduleWaitHandle* asReschedule();
+  c_SleepWaitHandle* asSleep();
+  c_ExternalThreadEventWaitHandle* asExternalThreadEvent();
+
   // The code in the TC will depend on the values of these constants.
   // See emitAwait().
   static const int8_t STATE_SUCCEEDED = 0;
@@ -138,11 +155,11 @@ class c_WaitHandle : public ExtObjectDataFlags<ObjectData::IsWaitHandle> {
     // !STATE_SUCCEEDED && !STATE_FAILED
     struct {
       // WaitableWaitHandle: !STATE_SUCCEEDED && !STATE_FAILED
-      c_BlockableWaitHandle* m_firstParent;
+      AsioBlockableChain m_parentChain;
 
       union {
         // BlockableWaitHandle: STATE_BLOCKED
-        c_BlockableWaitHandle* m_nextParent;
+        AsioBlockable m_blockable;
 
         // ExternalThreadEventWaitHandle: STATE_WAITING
         // SleepWaitHandle: STATE_WAITING

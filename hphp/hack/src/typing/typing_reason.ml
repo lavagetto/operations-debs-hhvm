@@ -41,6 +41,7 @@ type t =
   | Rattr          of Pos.t
   | Rxhp           of Pos.t
   | Rret_div       of Pos.t
+  | Ryield         of Pos.t
   | Rlost_info     of string * t * Pos.t
   | Rcoerced       of Pos.t * Pos.t * string
   | Rformat        of Pos.t * string * t
@@ -48,6 +49,8 @@ type t =
   | Runknown_class of Pos.t
   | Rdynamic_yield of Pos.t * Pos.t * string * string
   | Rmap_append of Pos.t
+  | Rvar_param of Pos.t
+  | Rinstantiate of t * string * t
 
 (* Translate a reason to a (pos, string) list, suitable for error_l. This
  * previously returned a string, however the need to return multiple lines with
@@ -84,6 +87,8 @@ let rec to_string prefix r =
   | Rattr            _ -> [(p, prefix ^ " because it is used in an attribute")]
   | Rxhp             _ -> [(p, prefix ^ " because it is used as an XML element")]
   | Rret_div         _ -> [(p, prefix ^ " because it is the result of a division (/)")]
+  | Ryield           _ -> [(p, prefix ^ " because functions with \"yield\" implicitly return Generator")]
+  | Rvar_param       _ -> [(p, prefix ^ " (variadic argument)")]
   | Rcoerced     (p1, p2, s)  ->
       [
         (p, prefix);
@@ -115,6 +120,9 @@ let rec to_string prefix r =
   | Rmap_append _ ->
       [(p, prefix^" because you can only append a Pair<Tkey, Tvalue> to an \
       Map<Tkey, Tvalue>")]
+  | Rinstantiate (r_orig, generic_name, r_inst) ->
+      (to_string prefix r_orig) @
+        (to_string ("  via this generic " ^ generic_name) r_inst)
 
 and to_pos = function
   | Rnone     -> Pos.none
@@ -146,6 +154,7 @@ and to_pos = function
   | Rattr        p -> p
   | Rxhp         p -> p
   | Rret_div     p -> p
+  | Ryield       p -> p
   | Rcoerced    (p, _, _) -> p
   | Rlost_info (_, r, _) -> to_pos r
   | Rformat      (p, _, _) -> p
@@ -153,6 +162,8 @@ and to_pos = function
   | Runknown_class p -> p
   | Rdynamic_yield (p, _, _, _) -> p
   | Rmap_append p -> p
+  | Rvar_param p -> p
+  | Rinstantiate (_, _, r) -> to_pos r
 
 type ureason =
   | URnone
@@ -184,6 +195,8 @@ type ureason =
   | URpair_access
   | URdynamic_yield
   | URnewtype_cstr
+  | URclass_req
+  | URclass_req_merge
   | URenum
 
 let string_of_ureason = function
@@ -199,7 +212,7 @@ let string_of_ureason = function
   | URvalue -> "The values of this Map are incompatible"
   | URif -> "The two branches of ? must have the same type"
   | URawait -> "await can only operate on an Awaitable"
-  | URyield -> "Some values passed to yield are incompatible"
+  | URyield -> "Invalid yield"
   | URxhp -> "Invalid xhp value"
   | URarray_get -> "Invalid index type for this array"
   | URmap_get -> "Invalid index type for this Map"
@@ -220,6 +233,8 @@ let string_of_ureason = function
       "When using DynamicYield, yield*() methods should have type Awaitable"
   | URnewtype_cstr ->
       "Invalid constraint on newtype"
+  | URclass_req -> "Unable to satisfy trait/interface requirement"
+  | URclass_req_merge -> "Incompatible trait/interface requirements"
   | URenum ->
       "Constant does not match the type of the Enum it is in"
 

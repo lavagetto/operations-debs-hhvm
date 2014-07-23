@@ -23,8 +23,9 @@
 #include "hphp/runtime/vm/jit/code-gen-helpers-x64.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/mc-generator-internal.h"
-#include "hphp/runtime/vm/jit/write-lease.h"
+#include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/translator-runtime.h"
+#include "hphp/runtime/vm/jit/write-lease.h"
 
 namespace HPHP { namespace JIT { namespace X64 {
 
@@ -45,7 +46,7 @@ void emitStackCheck(X64Assembler& a, int funcDepth, Offset pc) {
   a.    movq   (rVmSp, rAsm);  // copy to destroy
   a.    andq   (stackMask, rAsm);
   a.    subq   (funcDepth + Stack::sSurprisePageSize, rAsm);
-  a.    jl     (tx->uniqueStubs.stackOverflowHelper);
+  a.    jl     (mcg->tx().uniqueStubs.stackOverflowHelper);
 }
 
 /*
@@ -102,7 +103,7 @@ TCA emitFuncGuard(X64Assembler& a, const Func* func) {
   } else {
     a.  cmpq   (funcImm.l(), rStashedAR[AROFF(m_func)]);
   }
-  a.    jnz    (tx->uniqueStubs.funcPrologueRedispatch);
+  a.    jnz    (mcg->tx().uniqueStubs.funcPrologueRedispatch);
 
   assert(funcPrologueToGuard(a.frontier(), func) == aStart);
   assert(funcPrologueHasGuard(a.frontier(), func));
@@ -129,13 +130,13 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
 
   Asm a { mcg->code.main() };
 
-  if (tx->mode() == TransKind::Proflogue) {
+  if (mcg->tx().mode() == TransKind::Proflogue) {
     assert(func->shouldPGO());
-    TransID transId  = tx->profData()->curTransID();
-    auto counterAddr = tx->profData()->transCounterAddr(transId);
+    TransID transId  = mcg->tx().profData()->curTransID();
+    auto counterAddr = mcg->tx().profData()->transCounterAddr(transId);
     a.movq(counterAddr, rAsm);
     a.decq(rAsm[0]);
-    tx->profData()->setProfiling(func->getFuncId());
+    mcg->tx().profData()->setProfiling(func->getFuncId());
   }
 
   // Note: you're not allowed to use rVmSp around here for anything in
@@ -226,7 +227,7 @@ SrcKey emitPrologueWork(Func* func, int nPassed) {
 
     if (!(func->attrs() & AttrStatic)) {
       a.shrq(1, rAsm);
-      ifThen(a, CC_NBE, [&] {
+      ifThen(a, CC_NBE, [&](Asm& a) {
         a.shlq(1, rAsm);
         emitIncRefCheckNonStatic(a, rAsm, KindOfObject);
       });
@@ -369,7 +370,7 @@ TCA emitCallArrayPrologue(Func* func, DVFuncletsVec& dvs) {
     }
     emitBindJmp(mainCode, frozenCode, SrcKey(func, func->base(), false));
   }
-  mcg->cgFixups().process();
+  mcg->cgFixups().process(nullptr);
   return start;
 }
 

@@ -52,11 +52,55 @@ FIND_PACKAGE_HANDLE_STANDARD_ARGS(LibDwarf DEFAULT_MSG
 
 if (LIBDWARF_LIBRARIES AND LIBDWARF_INCLUDE_DIRS)
   set(CMAKE_REQUIRED_INCLUDES ${LIBDWARF_INCLUDE_DIRS})
-  set(CMAKE_REQUIRED_LIBRARIES ${LIBDWARF_LIBRARIES})
-  include(CheckSymbolExists)
-  CHECK_SYMBOL_EXISTS(dwarf_encode_leb128 "libdwarf.h" LIBDWARF_HAVE_ENCODE_LEB128)
+  set(CMAKE_REQUIRED_LIBRARIES ${LIBDWARF_LIBRARIES} ${LIBELF_LIBRARIES})
+
+  # libdwarf makes breaking changes occasionally and doesn't provide an easy
+  # way to test for them. The following checks should detect the changes and
+  # pass that information on accordingly.
+  INCLUDE(CheckCXXSourceCompiles)
+  INCLUDE(CheckFunctionExists)
+
+  MACRO(CHECK_LIBDWARF_INIT init params var)
+    # Check for the existence of this particular init function.
+    unset(INIT_EXISTS CACHE)
+    CHECK_FUNCTION_EXISTS(${init} INIT_EXISTS)
+    if (INIT_EXISTS)
+      set(LIBDWARF_USE_INIT_C ${var})
+
+      # Check to see if we can use a const name.
+      unset(DW_CONST CACHE)
+      set(CMAKE_REQUIRED_FLAGS "-std=c++0x")
+      CHECK_CXX_SOURCE_COMPILES("
+      #include <libdwarf.h>
+      #include <cstddef>
+      int dwarfCallback(const char * a, int b, Dwarf_Unsigned c,
+        Dwarf_Unsigned d, Dwarf_Unsigned e, Dwarf_Unsigned f,
+        Dwarf_Unsigned * g, Dwarf_Ptr h, int * i) {}
+      int main() { ${init}(${params}); return 0; }" DW_CONST)
+      if (DW_CONST)
+        set(LIBDWARF_CONST_NAME 1)
+      else()
+        set(LIBDWARF_CONST_NAME 0)
+      endif()
+    endif()
+  ENDMACRO(CHECK_LIBDWARF_INIT)
+
+  # Order is important, last one is used.
+  CHECK_LIBDWARF_INIT("dwarf_producer_init"   "0, dwarfCallback, nullptr, nullptr, nullptr"          0)
+  CHECK_LIBDWARF_INIT("dwarf_producer_init_c" "0, dwarfCallback, nullptr, nullptr, nullptr, nullptr" 1)
+endif()
+
+if(LIBDWARF_CONST_NAME)
+  message(STATUS "libdwarf uses const char* type")
+else()
+  message(STATUS "libdwarf uses char* type")
+endif()
+if(LIBDWARF_USE_INIT_C)
+  message(STATUS "libdwarf has dwarf_producer_init_c")
+else()
+  message(STATUS "libdwarf does not have dwarf_producer_init_c, using dwarf_producer_init")
 endif()
 
 mark_as_advanced(LIBDW_INCLUDE_DIR DWARF_INCLUDE_DIR)
 mark_as_advanced(LIBDWARF_INCLUDE_DIRS LIBDWARF_LIBRARIES)
-mark_as_advanced(LIBDWARF_HAVE_ENCODE_LEB128)
+mark_as_advanced(LIBDWARF_CONST_NAME LIBDWARF_USE_INIT_C)

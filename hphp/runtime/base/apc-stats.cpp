@@ -23,6 +23,8 @@
 #include "hphp/runtime/base/apc-handle.h"
 #include "hphp/runtime/base/apc-array.h"
 #include "hphp/runtime/base/apc-object.h"
+#include "hphp/runtime/ext/ext_apc.h"
+#include "hphp/runtime/base/apc-collection.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -53,24 +55,27 @@ size_t getMemSize(const APCHandle* handle) {
     return sizeof(APCHandle);
   }
   if (t == KindOfString) {
-    if (handle->getUncounted()) {
+    if (handle->isUncounted()) {
       return sizeof(APCTypedValue) +
              getMemSize(APCTypedValue::fromHandle(handle)->getStringData());
     }
     return getMemSize(APCString::fromHandle(handle));
   }
   if (t == KindOfArray) {
-    if (handle->getSerializedArray()) {
+    if (handle->isSerializedArray()) {
       return getMemSize(APCString::fromHandle(handle));
     }
-    if (handle->getUncounted()) {
+    if (handle->isUncounted()) {
       return sizeof(APCTypedValue) +
              getMemSize(APCTypedValue::fromHandle(handle)->getArrayData());
     }
     return getMemSize(APCArray::fromHandle(handle));
   }
   if (t == KindOfObject) {
-    if (handle->getIsObj()) {
+    if (handle->isCollection()) {
+      return getMemSize(APCCollection::fromHandle(handle));
+    }
+    if (handle->isObj()) {
       return getMemSize(APCObject::fromHandle(handle));
     }
     return getMemSize(APCString::fromHandle(handle));
@@ -111,6 +116,11 @@ size_t getMemSize(const APCObject* obj) {
     if (prop->val) size += getMemSize(prop->val);
   }
   return size;
+}
+
+inline
+size_t getMemSize(const APCCollection* obj) {
+  return sizeof(APCCollection) + obj->m_size;
 }
 
 size_t getMemSize(const ArrayData* arr) {
@@ -192,6 +202,70 @@ APCStats::~APCStats() {
   if (m_detailedStats) delete m_detailedStats;
 }
 
+std::string APCStats::getStatsInfo() const {
+  std::string info("APC info\nValue size: ");
+  info += std::to_string(m_valueSize->getSum()) +
+          "\nKey size: " +
+          std::to_string(m_keySize->getSum()) +
+          "\nMapped to file data size: " +
+          std::to_string(m_inFileSize->getSum()) +
+          "\nIn memory primed data size: " +
+          std::to_string(m_livePrimedSize->getSum()) +
+          "\nEntries count: " +
+          std::to_string(m_entries->getValue()) +
+          "\nPrimed entries count: " +
+          std::to_string(m_primedEntries->getValue()) +
+          "\nIn memory primed entries count: " +
+          std::to_string(m_livePrimedEntries->getValue());
+  if (apcExtension::UseUncounted) {
+    info += "\nPending deletes via treadmill size: " +
+            std::to_string(m_pendingDeleteSize->getSum());
+  }
+  if (m_detailedStats) {
+    info += m_detailedStats->getStatsInfo();
+  }
+  return info + "\n";
+}
+
+const StaticString s_entries("entries");
+const StaticString s_primedEntries("primed_entries");
+const StaticString s_primedLiveEntries("primed_live_entries");
+const StaticString s_valuesSize("values_size");
+const StaticString s_keysSize("keys_size");
+const StaticString s_primedInFileSize("primed_in_file_size");
+const StaticString s_primeLiveSize("primed_live_size");
+const StaticString s_pendingDeleteSize("pending_delete_size");
+
+void APCStats::collectStats(std::map<const StringData*, int64_t>& stats) const {
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_entries.get(),
+                                            m_entries->getValue()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_primedEntries.get(),
+                                            m_primedEntries->getValue()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_primedLiveEntries.get(),
+                                            m_livePrimedEntries->getValue()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_valuesSize.get(),
+                                            m_valueSize->getSum()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_keysSize.get(),
+                                            m_keySize->getSum()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_primedInFileSize.get(),
+                                            m_inFileSize->getSum()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_primeLiveSize.get(),
+                                            m_livePrimedSize->getSum()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_pendingDeleteSize.get(),
+                                            m_pendingDeleteSize->getSum()));
+  if (m_detailedStats) {
+    m_detailedStats->collectStats(stats);
+  }
+}
+
 APCDetailedStats::APCDetailedStats() : m_uncounted(nullptr)
                                      , m_apcString(nullptr)
                                      , m_uncString(nullptr)
@@ -200,6 +274,7 @@ APCDetailedStats::APCDetailedStats() : m_uncounted(nullptr)
                                      , m_uncArray(nullptr)
                                      , m_serObject(nullptr)
                                      , m_apcObject(nullptr)
+                                     , m_apcColl(nullptr)
                                      , m_setValues(nullptr)
                                      , m_delValues(nullptr)
                                      , m_replValues(nullptr)
@@ -212,11 +287,93 @@ APCDetailedStats::APCDetailedStats() : m_uncounted(nullptr)
   m_uncArray = ServiceData::createCounter("apc.type_unc_array");
   m_serObject = ServiceData::createCounter("apc.type_ser_object");
   m_apcObject = ServiceData::createCounter("apc.type_apc_object");
+  m_apcColl = ServiceData::createCounter("apc.type_apc_collection");
 
   m_setValues = ServiceData::createCounter("apc.set_values");
   m_delValues = ServiceData::createCounter("apc.deleted_values");
   m_replValues = ServiceData::createCounter("apc.replaced_values");
   m_expValues = ServiceData::createCounter("apc.expired_values");
+}
+
+const StaticString s_typeUncounted("type_uncounted");
+const StaticString s_typeAPCString("type_apc_string");
+const StaticString s_typeUncountedString("type_unc_string");
+const StaticString s_typeSerArray("type_ser_array");
+const StaticString s_typeAPCArray("type_apc_array");
+const StaticString s_typUncountedArray("type_unc_array");
+const StaticString s_typeSerObject("type_ser_object");
+const StaticString s_typeAPCObject("type_apc_object");
+const StaticString s_setValueCount("set_values_count");
+const StaticString s_deleteValuesCount("deleted_values_count");
+const StaticString s_replacedValueCount("replaced_values_count");
+const StaticString s_expiredValueCount("expired_values_count");
+
+std::string APCDetailedStats::getStatsInfo() const {
+  return "\nPrimitve and static strings count: " +
+         std::to_string(m_uncounted->getValue()) +
+         "\nAPC strings count: " +
+         std::to_string(m_apcString->getValue()) +
+         "\nUncounted strings count: " +
+         std::to_string(m_uncString->getValue()) +
+         "\nSerialized array count: " +
+         std::to_string(m_serArray->getValue()) +
+         "\nAPC array count: " +
+         std::to_string(m_apcArray->getValue()) +
+         "\nUncounted array count: " +
+         std::to_string(m_uncArray->getValue()) +
+         "\nSerialized object count: " +
+         std::to_string(m_serObject->getValue()) +
+         "\nAPC object count: " +
+         std::to_string(m_apcObject->getValue()) +
+         "\add count: " +
+         std::to_string(m_setValues->getValue()) +
+         "\ndelete count: " +
+         std::to_string(m_delValues->getValue()) +
+         "\nreplaced count: " +
+         std::to_string(m_replValues->getValue()) +
+         "\nexpired count: " +
+         std::to_string(m_expValues->getValue()) +
+         "\n";
+}
+
+void APCDetailedStats::collectStats(
+    std::map<const StringData*, int64_t>& stats) const {
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_typeUncounted.get(),
+                                              m_uncounted->getValue()));
+  stats.insert(
+      std::pair<const StringData*, int64_t>(s_typeAPCString.get(),
+                                            m_apcString->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_typeUncountedString.get(),
+                                              m_uncString->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_typeSerArray.get(),
+                                              m_serArray->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_typeAPCArray.get(),
+                                              m_apcArray->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_typUncountedArray.get(),
+                                              m_uncArray->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_typeSerObject.get(),
+                                              m_serObject->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_typeAPCObject.get(),
+                                              m_apcObject->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_setValueCount.get(),
+                                              m_setValues->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_deleteValuesCount.get(),
+                                              m_delValues->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_replacedValueCount.get(),
+                                              m_replValues->getValue()));
+  stats.insert(
+        std::pair<const StringData*, int64_t>(s_expiredValueCount.get(),
+                                              m_expValues->getValue()));
 }
 
 void APCDetailedStats::addAPCValue(APCHandle* handle) {
@@ -257,23 +414,25 @@ void APCDetailedStats::addType(APCHandle* handle) {
   }
   switch (type) {
   case KindOfString:
-    if (handle->getUncounted()) {
+    if (handle->isUncounted()) {
       m_uncString->increment();
     } else {
       m_apcString->increment();
     }
     return;
   case KindOfArray:
-    if (handle->getUncounted()) {
+    if (handle->isUncounted()) {
       m_uncArray->increment();
-    } else if (handle->getSerializedArray()) {
+    } else if (handle->isSerializedArray()) {
       m_serArray->increment();
     } else {
       m_apcArray->increment();
     }
     return;
   case KindOfObject:
-    if (handle->getIsObj()) {
+    if (handle->isCollection()) {
+      m_apcColl->increment();
+    } else if (handle->isObj()) {
       m_apcObject->increment();
     } else {
       m_serObject->increment();
@@ -296,23 +455,25 @@ void APCDetailedStats::removeType(APCHandle* handle) {
   }
   switch (type) {
   case KindOfString:
-    if (handle->getUncounted()) {
+    if (handle->isUncounted()) {
       m_uncString->decrement();
     } else {
       m_apcString->decrement();
     }
     return;
   case KindOfArray:
-    if (handle->getUncounted()) {
+    if (handle->isUncounted()) {
       m_uncArray->decrement();
-    } else if (handle->getSerializedArray()) {
+    } else if (handle->isSerializedArray()) {
       m_serArray->decrement();
     } else {
       m_apcArray->decrement();
     }
     return;
   case KindOfObject:
-    if (handle->getIsObj()) {
+    if (handle->isCollection()) {
+      m_apcColl->decrement();
+    } else  if (handle->isObj()) {
       m_apcObject->decrement();
     } else {
       m_serObject->decrement();

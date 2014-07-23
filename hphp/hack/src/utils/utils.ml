@@ -54,6 +54,8 @@ module type MapSig = sig
   val choose : 'a t -> key * 'a
   val keys: 'a t -> key list
   val values: 'a t -> 'a list
+
+  val map_env: ('c -> 'a -> 'c * 'b) -> 'c -> 'a t -> 'c * 'b t
   (* use only in testing code *)
   val elements: 'a t -> (key * 'a) list
 end
@@ -82,6 +84,14 @@ module MyMap: functor (Ord: Map.OrderedType)
     let keys m = fold (fun k v acc -> k :: acc) m []
     let values m = fold (fun k v acc -> v :: acc) m []
     let elements m = fold (fun k v acc -> (k,v)::acc) m []
+
+    let map_env f env m =
+      fold (
+        fun x y (env, acc) ->
+          let env, y = f env y in
+          env, add x y acc
+      ) m (env, empty)
+
   end
 
 module SMap = MyMap(String)
@@ -101,6 +111,10 @@ let internal_error s =
 let opt f env = function
   | None -> env, None
   | Some x -> let env, x = f env x in env, Some x
+
+let opt_map f = function
+  | None -> None
+  | Some x -> Some (f x)
 
 let default x y f =
   match y with
@@ -144,7 +158,6 @@ let imap_inter_list = function
   | x :: rl ->
       List.fold_left imap_inter x rl
 
-
 let partition_smap f m =
   SMap.fold (
   fun x ty (acc1, acc2) ->
@@ -153,20 +166,8 @@ let partition_smap f m =
     else acc1, SMap.add x ty acc2
  ) m (SMap.empty, SMap.empty)
 
-let smap_env f env m =
-  SMap.fold (
-  fun x y (env, acc) ->
-    let env, y = f env y in
-    env, SMap.add x y acc
- ) m (env, SMap.empty)
-
-let rec lfold f env l =
-  match l with
-  | [] -> env, []
-  | x :: rl ->
-      let env, x = f env x in
-      let env, rl = lfold f env rl in
-      env, x :: rl
+(* This is a significant misnomer... you may want fold_left_env instead. *)
+let lfold = lmap
 
 let rec lfold2 f env l1 l2 =
   match l1, l2 with
@@ -193,13 +194,16 @@ let rec wfold_left2 f env l1 l2 =
       let env = f env x1 x2 in
       wfold_left2 f env rl1 rl2
 
+let apply_for_env_fold f env acc x =
+  let env, x = f env x in
+  env, x :: acc
+
 let rec fold_left_env f env acc l =
   match l with
   | [] -> env, acc
   | x :: rl ->
       let env, acc = f env acc x in
-      let env, acc = fold_left_env f env acc rl in
-      env, acc
+      fold_left_env f env acc rl
 
 let rec make_list f n =
   if n = 0
@@ -293,18 +297,6 @@ let str_starts_with long short =
   with Invalid_argument _ ->
     false
 
-let spinner =
-  let state = ref 0 in
-  fun () ->
-    begin
-      let str = List.nth ["-"; "\\"; "|"; "/"] (!state) in
-      state := (!state + 1) mod 4;
-      str
-    end
-
-(* ANSI escape sequence to clear whole line *)
-let clear_line_seq = "\r\x1b[0K"
-
 (*****************************************************************************)
 (* Same as List.iter2, except that we only iterate as far as the shortest
  * of both lists.
@@ -315,3 +307,7 @@ let rec iter2_shortest f l1 l2 =
   match l1, l2 with
   | [], _ | _, [] -> ()
   | x1 :: rl1, x2 :: rl2 -> f x1 x2; iter2_shortest f rl1 rl2
+
+(* We may want to replace this with a tail-recursive map at some point,
+ * factoring here so we have a clean way to grep. *)
+let rev_rev_map f l = List.rev (List.rev_map f l)

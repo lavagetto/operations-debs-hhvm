@@ -33,15 +33,13 @@ struct CodeGenerator : public JIT::CodeGenerator {
   typedef JIT::X64Assembler Asm;
 
   CodeGenerator(const IRUnit& unit, CodeBlock& mainCode, CodeBlock& coldCode,
-                CodeBlock& frozenCode, JIT::MCGenerator* mcg,
-                CodegenState& state)
+                CodeBlock& frozenCode, CodegenState& state)
     : m_unit(unit)
     , m_mainCode(mainCode)
     , m_coldCode(coldCode)
     , m_frozenCode(frozenCode)
     , m_as(mainCode)
     , m_acold(coldCode)
-    , m_mcg(mcg)
     , m_state(state)
     , m_rScratch(InvalidReg)
     , m_curInst(nullptr)
@@ -77,44 +75,31 @@ private:
   CallDest callDestDbl(const IRInstruction*) const;
 
   // Main call helper:
-  CallHelperInfo cgCallHelper(Asm& a,
-                              CppCall call,
-                              const CallDest& dstInfo,
-                              SyncOptions sync,
-                              ArgGroup& args,
-                              RegSet toSave);
+  void cgCallHelper(Asm& a, CppCall call, const CallDest& dstInfo,
+                    SyncOptions sync, ArgGroup& args, RegSet toSave);
+
   // Overload to make the toSave RegSet optional:
-  CallHelperInfo cgCallHelper(Asm& a,
-                              CppCall call,
-                              const CallDest& dstInfo,
-                              SyncOptions sync,
-                              ArgGroup& args);
+  void cgCallHelper(Asm& a, CppCall call, const CallDest& dstInfo,
+                    SyncOptions sync, ArgGroup& args);
+
   void cgInterpOneCommon(IRInstruction* inst);
 
   enum class Width { Value, Full };
-  template<class MemRef>
-  void cgStore(MemRef dst, SSATmp* src, PhysLoc src_loc, Width);
-  template<class MemRef>
-  void cgStoreTypedValue(MemRef dst, SSATmp* src, PhysLoc src_loc);
+  void cgStore(MemoryRef dst, SSATmp* src, PhysLoc src_loc, Width);
+  void cgStoreTypedValue(MemoryRef dst, SSATmp* src, PhysLoc src_loc);
 
   // helpers to load a value in dst. When label is not null a type check
   // is performed against value to ensure it is of the type expected by dst
-  template<class BaseRef>
-  void cgLoad(SSATmp* dst, PhysLoc dstLoc, BaseRef value,
+  void cgLoad(SSATmp* dst, PhysLoc dstLoc, MemoryRef value,
               Block* label = nullptr);
-  template<class BaseRef>
-  void cgLoadTypedValue(SSATmp* dst, PhysLoc dstLoc, BaseRef base,
+  void cgLoadTypedValue(SSATmp* dst, PhysLoc dstLoc, MemoryRef base,
                         Block* label = nullptr);
 
   // internal helpers to manage register conflicts from a source to a PhysReg
   // destination.
   // If the conflict cannot be resolved the out param isResolved is set to
   // false and the caller should take proper action
-  IndexedMemoryRef resolveRegCollision(PhysReg dst,
-                                       IndexedMemoryRef value,
-                                       bool& isResolved);
-  MemoryRef resolveRegCollision(PhysReg dst,
-                                MemoryRef value,
+  MemoryRef resolveRegCollision(PhysReg dst, MemoryRef value,
                                 bool& isResolved);
 
   template<class Loc1, class Loc2, class JmpFn>
@@ -168,8 +153,9 @@ private:
   void cgReqBindJccInt(IRInstruction* inst);  // helper
   void cgExitJccInt(IRInstruction* inst); // helper
   void emitCmpInt(IRInstruction* inst, ConditionCode);
-  void cgCmpHelper(IRInstruction* inst,
-                   void (Asm::*setter)(Reg8),
+  void emitCmpEqDbl(IRInstruction* inst, ComparisonPred);
+  void emitCmpRelDbl(IRInstruction* inst, ConditionCode, bool);
+  void cgCmpHelper(IRInstruction* inst, ConditionCode,
                    int64_t (*str_cmp_str)(StringData*, StringData*),
                    int64_t (*str_cmp_int)(StringData*, int64_t),
                    int64_t (*str_cmp_obj)(StringData*, ObjectData*),
@@ -197,7 +183,6 @@ private:
   void emitSetCc(IRInstruction*, ConditionCode);
   template<class JmpFn>
   void emitIsTypeTest(IRInstruction* inst, JmpFn doJcc);
-  void doubleCmp(Asm& a, RegXMM xmmReg0, RegXMM xmmReg1);
   void cgIsTypeCommon(IRInstruction* inst, bool negate);
   void cgJmpIsTypeCommon(IRInstruction* inst, bool negate);
   void cgIsTypeMemCommon(IRInstruction*, bool negate);
@@ -207,15 +192,15 @@ private:
 
   bool decRefDestroyIsUnlikely(OptDecRefProfile& profile, Type type);
   template <typename F>
-  Address cgCheckStaticBitAndDecRef(Type type,
+  Address cgCheckStaticBitAndDecRef(Asm& a, Type type,
                                     PhysReg dataReg,
                                     F destroy);
-  Address cgCheckStaticBitAndDecRef(Type type,
+  Address cgCheckStaticBitAndDecRef(Asm& a, Type type,
                                     PhysReg dataReg);
   Address cgCheckRefCountedType(PhysReg typeReg);
   Address cgCheckRefCountedType(PhysReg baseReg,
                                 int64_t offset);
-  void cgDecRefStaticType(Type type,
+  void cgDecRefStaticType(Asm& a, Type type,
                           PhysReg dataReg,
                           bool genZeroCheck);
   void cgDecRefDynamicType(PhysReg typeReg,
@@ -256,14 +241,7 @@ private:
    * true.
    */
   template <class Block>
-  void ifBlock(ConditionCode cc, Block taken, bool unlikely = false) {
-    if (unlikely) return unlikelyIfBlock(cc, taken);
-
-    Label done;
-    m_as.jcc(ccNegate(cc), done);
-    taken(m_as);
-    asm_label(m_as, done);
-  }
+  void ifBlock(ConditionCode cc, Block taken, bool unlikely = false);
 
   /*
    * Generate an if-block that branches around some unlikely code, handling
@@ -273,66 +251,22 @@ private:
    * Passes the proper assembler to use to the unlikely function.
    */
   template <class Block>
-  void unlikelyIfBlock(ConditionCode cc, Block unlikely) {
-    if (m_as.base() == m_acold.base()) {
-      Label done;
-      m_as.jcc(ccNegate(cc), done);
-      unlikely(m_as);
-      asm_label(m_as, done);
-    } else {
-      Label unlikelyLabel, done;
-      m_as.jcc(cc, unlikelyLabel);
-      asm_label(m_acold, unlikelyLabel);
-      unlikely(m_acold);
-      m_acold.jmp(done);
-      asm_label(m_as, done);
-    }
-  }
+  void unlikelyIfBlock(ConditionCode cc, Block unlikely);
 
   // Generate an if-then-else block
   template <class Then, class Else>
-  void ifThenElse(Asm& a, ConditionCode cc, Then thenBlock, Else elseBlock) {
-    Label elseLabel, done;
-    a.jcc8(ccNegate(cc), elseLabel);
-    thenBlock(a);
-    a.jmp8(done);
-    asm_label(a, elseLabel);
-    elseBlock(a);
-    asm_label(a, done);
-  }
+  void ifThenElse(Asm& a, ConditionCode cc, Then thenBlock, Else elseBlock);
 
   // Generate an if-then-else block into m_as.
   template <class Then, class Else>
   void ifThenElse(ConditionCode cc, Then thenBlock, Else elseBlock,
-                  bool unlikely = false) {
-    if (unlikely) return unlikelyIfThenElse(cc, thenBlock, elseBlock);
-
-    ifThenElse(m_as, cc, thenBlock, elseBlock);
-  }
+                  bool unlikely = false);
 
   /*
    * Same as ifThenElse except the first block is off in acold
    */
   template <class Then, class Else>
-  void unlikelyIfThenElse(ConditionCode cc, Then unlikely, Else elseBlock) {
-    if (m_as.base() == m_acold.base()) {
-      Label elseLabel, done;
-      m_as.jcc8(ccNegate(cc), elseLabel);
-      unlikely(m_as);
-      m_as.jmp8(done);
-      asm_label(m_as, elseLabel);
-      elseBlock(m_as);
-      asm_label(m_as, done);
-    } else {
-      Label unlikelyLabel, done;
-      m_as.jcc(cc, unlikelyLabel);
-      elseBlock(m_as);
-      asm_label(m_acold, unlikelyLabel);
-      unlikely(m_acold);
-      m_acold.jmp(done);
-      asm_label(m_as, done);
-    }
-  }
+  void unlikelyIfThenElse(ConditionCode cc, Then unlikely, Else elseBlock);
 
   // This is for printing partially-generated traces when debugging
   void print() const;
@@ -344,7 +278,6 @@ private:
   CodeBlock&          m_frozenCode;
   Asm                 m_as;  // current "main" assembler
   Asm                 m_acold; // for cold code
-  MCGenerator*        m_mcg;
   CodegenState&       m_state;
   Reg64               m_rScratch; // currently selected GP scratch reg
   IRInstruction*      m_curInst;  // current instruction being generated
@@ -367,14 +300,6 @@ inline MemoryRef refTVType(MemoryRef ref) {
 }
 
 inline MemoryRef refTVData(MemoryRef ref) {
-  return *(ref.r + TVOFF(m_data));
-}
-
-inline IndexedMemoryRef refTVType(IndexedMemoryRef ref) {
-  return *(ref.r + TVOFF(m_type));
-}
-
-inline IndexedMemoryRef refTVData(IndexedMemoryRef ref) {
   return *(ref.r + TVOFF(m_data));
 }
 

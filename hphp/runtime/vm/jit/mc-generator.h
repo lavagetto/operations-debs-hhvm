@@ -33,6 +33,7 @@
 #include "hphp/runtime/vm/debug/debug.h"
 #include "hphp/runtime/vm/jit/back-end.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers.h"
+#include "hphp/runtime/vm/jit/fixup.h"
 #include "hphp/runtime/vm/jit/service-requests.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/unwind-x64.h"
@@ -41,6 +42,7 @@ namespace HPHP { namespace JIT {
 
 typedef X64Assembler Asm;
 typedef hphp_hash_map<TCA, TransID> TcaTransIDMap;
+typedef hphp_hash_map<uint64_t,const uint64_t*> LiteralMap;
 
 struct TReqInfo;
 struct Label;
@@ -90,6 +92,8 @@ struct CodeGenFixups {
   std::set<TCA*> m_codePointers;
   std::vector<TransBCMapping> m_bcMap;
   std::multimap<TCA,std::pair<int,int>> m_alignFixups;
+  GrowableVector<IncomingBranch> m_inProgressTailJumps;
+  LiteralMap m_literals;
 
   CodeBlock* m_tletMain{nullptr};
   CodeBlock* m_tletCold{nullptr};
@@ -101,14 +105,14 @@ struct CodeGenFixups {
     m_tletFrozen = frozen;
   }
 
-  void process();
+  void process(GrowableVector<IncomingBranch>* inProgressTailBranches);
   bool empty() const;
   void clear();
 };
 
 struct RelocationInfo {
-  RelocationInfo(TCA start, TCA end, TCA dest) :
-      m_start(start), m_end(end), m_dest(dest) {}
+  RelocationInfo(TCA start, TCA end) :
+      m_start(start), m_end(end) {}
 
   TCA start() const { return m_start; }
   TCA end() const { return m_end; }
@@ -127,7 +131,7 @@ struct RelocationInfo {
  private:
   TCA m_start;
   TCA m_end;
-  TCA m_dest;
+  TCA m_dest{nullptr};
   size_t m_destSize{size_t(-1)};
   /*
    * maps from src address, to range of destination addresse
@@ -170,6 +174,7 @@ public:
   Translator& tx() { return m_tx; }
   FixupMap& fixupMap() { return m_fixupMap; }
   CodeGenFixups& cgFixups() { return m_fixups; }
+  LiteralMap& literals() { return m_literals; }
   void recordSyncPoint(CodeAddress frontier, Offset pcOff, Offset spOff);
 
   DataBlock& globalData() { return code.data(); }
@@ -192,11 +197,6 @@ public:
   TCA getCallArrayPrologue(Func* func);
   void smashPrologueGuards(TCA* prologues, int numPrologues, const Func* func);
 
-  /*
-   * Get trampoline for a call into native C++.
-   */
-  TCA getNativeTrampoline(TCA helperAddress);
-
   inline void sync() {
     if (tl_regState == VMRegState::CLEAN) return;
     syncWork();
@@ -206,6 +206,11 @@ public:
   T* allocData(Args&&... args) {
     return code.data().alloc<T>(std::forward<Args>(args)...);
   }
+
+  /*
+   * Allocate a literal value in the global data section.
+   */
+  const uint64_t* allocLiteral(uint64_t val);
 
   /*
    * enterTC is the main entry point for the translator from the
@@ -300,12 +305,6 @@ private:
                       bool& smashed);
   bool handleServiceRequest(TReqInfo&, TCA& start, SrcKey& sk);
 
-
-  /*
-   * Emit trampoline to native C++ code.
-   */
-  TCA emitNativeTrampoline(TCA helperAddress);
-
   bool shouldTranslate() const {
     return code.mainUsed() < RuntimeOption::EvalJitAMaxUsage;
   }
@@ -335,8 +334,7 @@ private:
                             const TCA start,
                             bool exit, bool inPrologue);
 
-  void recordBCInstr(uint32_t op, const CodeBlock& cb,
-                     const TCA addr, bool cold);
+  void recordBCInstr(uint32_t op, const TCA addr, const TCA end, bool cold);
 
   /*
    * TC dump helpers
@@ -348,8 +346,6 @@ private:
 private:
   std::unique_ptr<BackEnd> m_backEnd;
   Translator         m_tx;
-  PointerMap         m_trampolineMap;
-  int                m_numNativeTrampolines;
 
   // maps jump addresses to the ID of translation containing them.
   TcaTransIDMap      m_jmpToTransID;
@@ -360,59 +356,15 @@ private:
   Debug::DebugInfo   m_debugInfo;
   FreeStubList       m_freeStubs;
   CodeGenFixups      m_fixups;
+  LiteralMap         m_literals;
 
-  // asize + acoldsize + afrozensize + gdatasize + trampolinesblocksize
+  // asize + acoldsize + afrozensize + gdatasize
   size_t             m_totalSize;
 };
-
-/*
- * Roughly expected length in bytes of each trampoline code sequence.
- *
- * Note that if stats is on, then this size is ~24 bytes due to the
- * instrumentation code that counts the number of calls through each
- * trampoline.
- *
- * When a small jump fits, it is only 7 bytes.  When it's a large jump
- * (followed by ud2) we have 11 bytes.
- *
- * We assume 11 bytes is the good size to expect, since stats are only
- * used for debugging modes.
- */
-const size_t kExpectedPerTrampolineSize = 11;
-
-const size_t kMaxNumTrampolines = kTrampolinesBlockSize /
-  kExpectedPerTrampolineSize;
 
 TCA fcallHelper(ActRec* ar, void* sp);
 TCA funcBodyHelper(ActRec* ar, void* sp);
 int64_t decodeCufIterHelper(Iter* it, TypedValue func);
-
-bool isNormalPropertyAccess(const NormalizedInstruction& i,
-                            int propInput,
-                            int objInput);
-
-struct PropInfo {
-  PropInfo()
-    : offset(-1)
-    , repoAuthType{}
-  {}
-  explicit PropInfo(int offset, RepoAuthType repoAuthType)
-    : offset(offset)
-    , repoAuthType{repoAuthType}
-  {}
-
-  int offset;
-  RepoAuthType repoAuthType;
-};
-
-PropInfo getPropertyOffset(const NormalizedInstruction& ni,
-                           Class* contextClass,
-                           const Class*& baseClass,
-                           const MInstrInfo& mii,
-                           unsigned mInd, unsigned iInd);
-PropInfo getFinalPropertyOffset(const NormalizedInstruction&,
-                                Class* contextClass,
-                                const MInstrInfo&);
 
 // Both emitIncStat()s push/pop flags but don't clobber any registers.
 extern void emitIncStat(CodeBlock& cb, uint64_t* tl_table, uint32_t index,

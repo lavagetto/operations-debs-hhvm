@@ -30,8 +30,8 @@
 #include "hphp/runtime/vm/member-operations.h"
 #include "hphp/runtime/vm/jit/guard-relaxation.h"
 #include "hphp/runtime/vm/jit/ir-builder.h"
-#include "hphp/runtime/vm/jit/runtime-type.h"
 #include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/translator-instrs.h"
 #include "hphp/runtime/vm/srckey.h"
 
 namespace HPHP {
@@ -132,7 +132,7 @@ struct HhbcTranslator {
   void checkTypeTopOfStack(Type type, Offset nextByteCode);
   void assertType(const RegionDesc::Location& loc, Type type);
   void checkType(const RegionDesc::Location& loc, Type type, Offset dest);
-  RuntimeType rttFromLocation(const Location& loc);
+  Type typeFromLocation(const Location& loc);
 
   // Inlining-related functions.
   void beginInlining(unsigned numArgs,
@@ -157,7 +157,6 @@ struct HhbcTranslator {
   void emitInterpOne(folly::Optional<Type> t, int popped, int pushed,
                      InterpOneData& id);
   std::string showStack() const;
-  bool hasExit() const { return m_hasExit; }
 
 public:
   /*
@@ -285,8 +284,8 @@ public:
   void emitDup();
   void emitUnboxR();
   void emitUnbox();
-  void emitJmpZ(Offset taken, Offset next, JmpFlags);
-  void emitJmpNZ(Offset taken, Offset next, JmpFlags);
+  void emitJmpZ(Offset taken, JmpFlags);
+  void emitJmpNZ(Offset taken, JmpFlags);
   void emitJmpImpl(int32_t offset, JmpFlags, Block* catchBlock);
   void emitJmp(int32_t offset, JmpFlags);
   void emitGt()    { emitCmp(Gt);    }
@@ -297,7 +296,6 @@ public:
   void emitNeq()   { emitCmp(Neq);   }
   void emitSame()  { emitCmp(Same);  }
   void emitNSame() { emitCmp(NSame); }
-  void emitFPassCOp();
   void emitFPassR();
   void emitFPassV();
   void emitFPushCufIter(int32_t numParams, int32_t itId);
@@ -377,7 +375,6 @@ public:
   void emitVerifyRetTypeV();
   void emitInstanceOfD(int classNameStrId);
   void emitInstanceOf();
-  void emitNop() {}
   void emitCastBool();
   void emitCastInt();
   void emitCastDouble();
@@ -438,53 +435,66 @@ public:
   void emitIterInit(uint32_t iterId,
                     int targetOffset,
                     uint32_t valLocalId,
-                    bool invertCond);
+                    bool invertCond,
+                    JmpFlags jmpFlags);
   void emitIterInitK(uint32_t iterId,
                      int targetOffset,
                      uint32_t valLocalId,
                      uint32_t keyLocalId,
-                     bool invertCond);
+                     bool invertCond,
+                     JmpFlags jmpFlags);
   void emitIterNext(uint32_t iterId,
                     int targetOffset,
                     uint32_t valLocalId,
-                    bool invertCond);
+                    bool invertCond,
+                    JmpFlags jmpFlags);
   void emitIterNextK(uint32_t iterId,
                      int targetOffset,
                      uint32_t valLocalId,
                      uint32_t keyLocalId,
-                     bool invertCond);
-  void emitMIterInit(uint32_t iterId, int targetOffset, uint32_t valLocalId);
+                     bool invertCond,
+                     JmpFlags jmpFlags);
+  void emitMIterInit(uint32_t iterId, int targetOffset, uint32_t valLocalId,
+                     JmpFlags jmpFlags);
   void emitMIterInitK(uint32_t iterId,
-                     int targetOffset,
-                     uint32_t valLocalId,
-                     uint32_t keyLocalId);
-  void emitMIterNext(uint32_t iterId, int targetOffset, uint32_t valLocalId);
+                      int targetOffset,
+                      uint32_t valLocalId,
+                      uint32_t keyLocalId,
+                      JmpFlags jmpFlags);
+  void emitMIterNext(uint32_t iterId, int targetOffset, uint32_t valLocalId,
+                     JmpFlags jmpFlags);
   void emitMIterNextK(uint32_t iterId,
-                     int targetOffset,
-                     uint32_t valLocalId,
-                     uint32_t keyLocalId);
+                      int targetOffset,
+                      uint32_t valLocalId,
+                      uint32_t keyLocalId,
+                      JmpFlags jmpFlags);
   void emitWIterInit(uint32_t iterId,
                      int targetOffset,
                      uint32_t valLocalId,
-                     bool invertCond);
+                     bool invertCond,
+                     JmpFlags jmpFlags);
   void emitWIterInitK(uint32_t iterId,
                       int targetOffset,
                       uint32_t valLocalId,
                       uint32_t keyLocalId,
-                      bool invertCond);
+                      bool invertCond,
+                      JmpFlags jmpFlags);
   void emitWIterNext(uint32_t iterId,
                      int targetOffset,
                      uint32_t valLocalId,
-                     bool invertCond);
+                     bool invertCond,
+                     JmpFlags jmpFlags);
   void emitWIterNextK(uint32_t iterId,
                       int targetOffset,
                       uint32_t valLocalId,
                       uint32_t keyLocalId,
-                      bool invertCond);
+                      bool invertCond,
+                      JmpFlags jmpFlags);
 
   void emitIterFree(uint32_t iterId);
   void emitMIterFree(uint32_t iterId);
-  void emitDecodeCufIter(uint32_t iterId, int targetOffset);
+  void emitDecodeCufIter(uint32_t iterId, int targetOffset,
+                    JmpFlags jmpFlags);
   void emitCIterFree(uint32_t iterId);
   void emitIterBreak(const ImmVector& iv, uint32_t offset, bool breakTracelet);
   void emitVerifyParamType(uint32_t paramId);
@@ -528,7 +538,7 @@ public:
 
 private:
   /*
-   * MInstrTranslator is responsible for translating one of the vector
+   * MInstrTranslator is responsible for translating one of the m-instr
    * instructions (CGetM, SetM, IssetM, etc..) into hhir.
    */
   struct MInstrTranslator {
@@ -595,15 +605,15 @@ private:
     void emitMapGet(SSATmp* key);
     void emitMapIsset();
 
-    // Generate a catch trace that does not perform any final DecRef operations
+    // Generate a catch block that does not perform any final DecRef operations
     // on scratch space, and return its first block.
     Block* makeEmptyCatch();
 
-    // Generate a catch trace that will contain DecRef instructions for tvRef
+    // Generate a catch block that will contain DecRef instructions for tvRef
     // and/or tvRef2 as required; return the first block.
     Block* makeCatch();
 
-    // Generate a catch trace that will free any scratch space used and perform
+    // Generate a catch block that will free any scratch space used and perform
     // a side-exit from a failed set operation, return the first block.
     Block* makeCatchSet();
 
@@ -618,13 +628,14 @@ private:
     SSATmp* getKey();
     SSATmp* getValue();
     SSATmp* getValAddr();
-    void    constrainBase(TypeConstraint tc, SSATmp* value = nullptr);
+    void    constrainBase(TypeConstraint tc);
     SSATmp* checkInitProp(SSATmp* baseAsObj,
                           SSATmp* propAddr,
                           PropInfo propOffset,
                           bool warn,
                           bool define);
     Class* contextClass() const;
+    PropInfo getCurrentPropertyOffset(const Class*& cls);
 
     /*
      * genStk is a wrapper around IRBuilder::gen() to deal with instructions
@@ -739,7 +750,7 @@ private:
   void emitEmptyMem(SSATmp* ptr);
   void emitIncDecMem(bool pre, bool inc, SSATmp* ptr, Block* exit);
   void checkStrictlyInteger(SSATmp*& key, KeyType& keyType,
-                            bool& checkForInt);
+                            bool& checkForInt, bool& converted);
   folly::Optional<Type> ratToAssertType(RepoAuthType rat) const;
   void destroyName(SSATmp* name);
   SSATmp* ldClsPropAddrKnown(Block* catchBlock,
@@ -754,16 +765,15 @@ private:
   void emitDecRefLocalsInline();
   void emitRet(Type type, bool freeInline);
   void emitCmp(Opcode opc);
-  SSATmp* emitJmpCondHelper(int32_t offset, bool negate, SSATmp* src);
-  void emitJmpHelper(int32_t taken, int32_t next, bool negate, JmpFlags,
-                     SSATmp* src);
+  SSATmp* emitJmpCondHelper(int32_t taken, bool negate, JmpFlags, SSATmp* src);
   SSATmp* emitIncDec(bool pre, bool inc, bool over, SSATmp* src);
   template<class Lambda>
-  SSATmp* emitIterInitCommon(int offset, Lambda genFunc, bool invertCond);
+  SSATmp* emitIterInitCommon(int offset, JmpFlags jmpFlags, Lambda genFunc,
+                             bool invertCond);
   BCMarker makeMarker(Offset bcOff);
   void updateMarker();
   template<class Lambda>
-  SSATmp* emitMIterInitCommon(int offset, Lambda genFunc);
+  SSATmp* emitMIterInitCommon(int offset, JmpFlags jmpFlags, Lambda genFunc);
   SSATmp* staticTVCns(const TypedValue*);
   void emitJmpSurpriseCheck(Block* catchBlock);
   void emitRetSurpriseCheck(SSATmp* fp, SSATmp* retVal, Block* catchBlock,
@@ -968,11 +978,6 @@ private:
   // True if we're on the last HHBC opcode that will be emitted for
   // this tracelet.
   bool m_lastBcOff;
-
-  // True if we've emitted an instruction that already handled
-  // end-of-tracelet duties.  (E.g. emitRetC, etc.)  If it's not true,
-  // we'll create a generic ReqBindJmp instruction after we're done.
-  bool m_hasExit;
 
   /*
    * The FPI stack is used for inlining---when we start inlining at an

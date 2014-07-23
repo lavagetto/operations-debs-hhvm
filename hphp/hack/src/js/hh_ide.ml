@@ -31,15 +31,6 @@ external to_byte_jsstring: string -> Js.js_string Js.t = "caml_js_from_byte_stri
 let output_json json =
   to_byte_jsstring (json_to_string json)
 
-let pos_to_json pos =
-  let line, start, end_ = Pos.info_pos pos in
-  let fn = Pos.filename pos in
-  JAssoc [ "filename",   JString fn;
-           "line",       JInt line;
-           "char_start", JInt start;
-           "char_end",   JInt end_;
-         ]
-
 let error el =
   let res =
     if el = [] then
@@ -176,36 +167,8 @@ let hh_check ?(check_mode=true) fn =
       error [l]
     end
 
-let autocomplete_result_to_json res =
-  let name = res.Autocomplete.name in
-  let pos = res.Autocomplete.pos in
-  let ty = res.Autocomplete.ty in
-  match pos, ty with
-  | None, None ->
-      JAssoc [ "name", JString name;
-             ]
-  | Some p, None ->
-      JAssoc [ "name", JString name;
-               "pos", pos_to_json p;
-             ]
-  | None, Some type_ ->
-      JAssoc [ "name", JString name;
-               "type", JString type_;
-             ]
-  | Some p, Some type_ ->
-    JAssoc [ "name", JString name;
-             "type", JString type_;
-             "pos", pos_to_json p;
-           ]
-
 let hh_auto_complete fn =
   AutocompleteService.attach_hooks();
-  Autocomplete.auto_complete := true;
-  Autocomplete.auto_complete_result := SMap.empty;
-  Autocomplete.auto_complete_for_global := "";
-  Autocomplete.argument_global_type := None;
-  Autocomplete.auto_complete_pos := None;
-  Autocomplete.auto_complete_vars := SMap.empty;
   let content = Hashtbl.find files fn in
   try
     let {Parser_hack.is_hh_file; comments; ast} =
@@ -236,19 +199,16 @@ let hh_auto_complete fn =
       | Some Autocomplete.Acvar -> "var"
       | None -> "none" in
     let result = AutocompleteService.get_results [] [] in
-    let result = SMap.fold
-        (fun _ res acc -> (autocomplete_result_to_json res) :: acc)
-        result
-        [] in
+    let result =
+      List.map AutocompleteService.autocomplete_result_to_json result
+    in
     AutocompleteService.detach_hooks();
-    Autocomplete.auto_complete := false;
     output_json (JAssoc [ "completions",     JList result;
                           "completion_type", JString completion_type_str;
                           "internal_error",  JBool false;
                         ])
   with _ ->
     AutocompleteService.detach_hooks();
-    Autocomplete.auto_complete := false;
     output_json (JAssoc [ "internal_error", JBool true;
                         ])
 
@@ -304,7 +264,7 @@ let hh_get_method_at_position fn line char =
             | Find_refs.LocalVar -> "local" in
           JAssoc [ "name",           JString res.Find_refs.name;
                    "result_type",    JString result_type;
-                   "pos",            pos_to_json res.Find_refs.pos;
+                   "pos",            Pos.json res.Find_refs.pos;
                    "internal_error", JBool false;
                  ]
       | _ -> JAssoc [ "internal_error", JBool false;
@@ -374,7 +334,7 @@ let hh_find_lvar_refs file line char =
     clean();
     Find_refs.find_refs_target := Some (line, char);
     ignore (hh_check ~check_mode:false file);
-    let res_list = List.map pos_to_json !Find_refs.find_refs_result in
+    let res_list = List.map Pos.json !Find_refs.find_refs_result in
     clean();
     output_json (JAssoc [ "positions",      JList res_list;
                           "internal_error", JBool false;
@@ -398,7 +358,7 @@ let hh_infer_type file line char =
 let hh_infer_pos file line char =
   let pos, _ = infer_at_pos file line char in
   let output = match pos with
-  | Some pos -> JAssoc [ "pos",            pos_to_json pos;
+  | Some pos -> JAssoc [ "pos",            Pos.json pos;
                          "internal_error", JBool false;
                        ]
   | None -> JAssoc [ "internal_error", JBool false;
@@ -413,7 +373,7 @@ let hh_file_summary fn =
     let res_list = List.map begin fun (pos, name, type_) ->
       JAssoc [ "name", JString name;
                "type", JString type_;
-               "pos",  pos_to_json pos;
+               "pos",  Pos.json pos;
              ]
       end outline in
     output_json (JAssoc [ "summary",          JList res_list;
@@ -453,7 +413,7 @@ let hh_get_method_calls fn =
   let results = !Typing_defs.accumulate_method_calls_result in
   let results = List.map begin fun (p, name) ->
     JAssoc [ "method_name", JString name;
-             "pos",         pos_to_json p;
+             "pos",         Pos.json p;
            ]
     end results in
   Typing_defs.accumulate_method_calls := false;
@@ -490,6 +450,20 @@ let hh_arg_info fn line char =
                         "internal_error",   JBool false;
                       ])
 
+let hh_format contents start end_ =
+  let result = Format_hack.region start end_ contents in
+  let error, result, internal_error = match result with
+    | Format_hack.Php_or_decl -> "Php_or_decl", "", false
+    | Format_hack.Parsing_error _ -> "Parsing_error", "", false
+    | Format_hack.Internal_error -> "", "", true
+    | Format_hack.Success s -> "", s, false
+  in
+  output_json (JAssoc [ "error_message", JString error;
+                        "result", JString result;
+                        "internal_error",   JBool internal_error;
+                      ])
+
+
 let (hh_check: (string, string -> Js.js_string Js.t) Js.meth_callback) = Js.wrap_callback hh_check
 let (hh_add_file: (string, string -> string -> unit) Js.meth_callback) = Js.wrap_callback hh_add_file
 let (hh_auto_complete: (string, string -> Js.js_string Js.t) Js.meth_callback) = Js.wrap_callback hh_auto_complete
@@ -502,6 +476,8 @@ let (hh_find_lvar_refs: (string, string -> int -> int -> Js.js_string Js.t) Js.m
 let (hh_get_method_calls: (string, string -> Js.js_string Js.t) Js.meth_callback) = Js.wrap_callback hh_get_method_calls
 let (hh_get_method_name: (string, string -> int -> int -> Js.js_string Js.t) Js.meth_callback) = Js.wrap_callback hh_get_method_at_position
 let (hh_arg_info: (string, string -> int -> int -> Js.js_string Js.t) Js.meth_callback) = Js.wrap_callback hh_arg_info
+let (hh_format: (string, string -> int -> int -> Js.js_string Js.t) Js.meth_callback) = Js.wrap_callback hh_format
+
 
 let export_fun0 f fname =
   Js.Unsafe.set (Js.Unsafe.eval_string "hh_ide") fname [|Js.Unsafe.inject f|];
@@ -544,3 +520,4 @@ let () = export_fun3 hh_find_lvar_refs "hh_find_lvar_refs" "hh_ide.str[1](x)" "y
 let () = export_fun1 hh_get_method_calls "hh_get_method_calls" "hh_ide.str[1](x)"
 let () = export_fun3 hh_get_method_name "hh_get_method_name" "hh_ide.str[1](x)" "y" "z"
 let () = export_fun3 hh_arg_info "hh_arg_info" "hh_ide.str[1](x)" "y" "z"
+let () = export_fun3 hh_format "hh_format" "hh_ide.str[1](x)" "y" "z"

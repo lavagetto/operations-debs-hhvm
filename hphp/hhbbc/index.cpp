@@ -63,6 +63,7 @@ namespace {
 
 const StaticString s_construct("__construct");
 const StaticString s_call("__call");
+const StaticString s_get("__get");
 const StaticString s_callStatic("__callStatic");
 const StaticString s_86ctor("86ctor");
 
@@ -352,8 +353,10 @@ struct ClassInfo {
    */
   bool hasMagicCall              = false;
   bool hasMagicCallStatic        = false;
+  bool hasMagicGet               = false;
   bool derivedHasMagicCall       = false;
   bool derivedHasMagicCallStatic = false;
+  bool derivedHasMagicGet        = false;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -417,6 +420,15 @@ bool Class::couldBeOverriden() const {
     [] (SString) { return true; },
     [] (borrowed_ptr<ClassInfo> cinfo) {
       return !(cinfo->cls->attrs & AttrNoOverride);
+    }
+  );
+}
+
+bool Class::couldHaveMagicGet() const {
+  return val.match(
+    [] (SString) { return true; },
+    [] (borrowed_ptr<ClassInfo> cinfo) {
+      return cinfo->derivedHasMagicGet;
     }
   );
 }
@@ -749,8 +761,9 @@ void add_unit_to_index(IndexData& index,
     for (auto& m : c->methods) {
       index.methods.insert({m->name, borrow(m)});
 
-      if (imethIt != end(imethodMap) &&
-          imethIt->second.count(m->name->data())) {
+      if (options.AllFuncsInterceptable ||
+          (imethIt != end(imethodMap) &&
+           imethIt->second.count(m->name->data()))) {
         m->attrs = m->attrs | AttrInterceptable;
       }
     }
@@ -761,7 +774,8 @@ void add_unit_to_index(IndexData& index,
   }
 
   for (auto& f : unit.funcs) {
-    if (options.InterceptableFunctions.count(f->name->data())) {
+    if (options.AllFuncsInterceptable ||
+        options.InterceptableFunctions.count(f->name->data())) {
       f->attrs = f->attrs | AttrInterceptable;
     }
     index.funcs.insert({f->name, borrow(f)});
@@ -946,11 +960,15 @@ void define_func_families(IndexData& index) {
   }
 }
 
-void mark_magic_on_parents(ClassInfo& cinfo, bool call, bool callStatic) {
-  if (call) cinfo.derivedHasMagicCall = true;
+void mark_magic_on_parents(ClassInfo& cinfo,
+                           bool call,
+                           bool callStatic,
+                           bool get) {
+  if (call)       cinfo.derivedHasMagicCall = true;
   if (callStatic) cinfo.derivedHasMagicCallStatic = true;
+  if (get)        cinfo.derivedHasMagicGet = true;
   if (cinfo.parent) {
-    mark_magic_on_parents(*cinfo.parent, call, callStatic);
+    mark_magic_on_parents(*cinfo.parent, call, callStatic, get);
   }
 }
 
@@ -959,11 +977,13 @@ void find_magic_methods(IndexData& index) {
     auto& methods         = cinfo->methods;
     auto const call       = methods.find(s_call.get()) != end(methods);
     auto const callStatic = methods.find(s_callStatic.get()) != end(methods);
+    auto const get        = methods.find(s_get.get()) != end(methods);
 
     cinfo->hasMagicCall       = call;
     cinfo->hasMagicCallStatic = callStatic;
-    if (call || callStatic) {
-      mark_magic_on_parents(*cinfo, call, callStatic);
+    cinfo->hasMagicGet        = get;
+    if (call || callStatic || get) {
+      mark_magic_on_parents(*cinfo, call, callStatic, get);
     }
   }
 }
@@ -1261,8 +1281,6 @@ folly::Optional<res::Class> Index::resolve_class(Context ctx,
     auto const cinfo = it->second;
     if ((cinfo->cls->attrs & AttrUnique) || boost::next(it) == end(classes)) {
       if (debug && boost::next(it) != end(classes)) {
-        // TODO(#3363851): There's some race here happening with
-        // closures in traits intermittently.
         std::fprintf(stderr, "non unique \"unique\" class: %s\n",
           cinfo->cls->name->data());
         for (; it != end(classes); ++it) {
@@ -1278,11 +1296,9 @@ folly::Optional<res::Class> Index::resolve_class(Context ctx,
   return name_only();
 }
 
-std::pair<res::Class,std::vector<borrowed_ptr<php::Class>>>
+std::pair<res::Class,borrowed_ptr<php::Class>>
 Index::resolve_closure_class(Context ctx, SString name) const {
   auto const rcls = resolve_class(ctx, name);
-
-#if 0  // Disabled because of TODO(#3363851)
 
   // Closure classes must be unique and defined in the unit that uses
   // the CreateCl opcode, so resolution must succeed.
@@ -1296,27 +1312,6 @@ Index::resolve_closure_class(Context ctx, SString name) const {
     *rcls,
     const_cast<borrowed_ptr<php::Class>>(rcls->val.right()->cls)
   };
-
-#else
-
-  if (rcls.hasValue() && rcls->val.right()) {
-    // This is the expected case.
-    return {
-      *rcls, { const_cast<borrowed_ptr<php::Class>>(rcls->val.right()->cls) }
-    };
-  }
-
-  std::fprintf(stderr,
-    "A Closure class (%s) failed to resolve normally---this is "
-    "a bug but we're tolerating it for now.\n", name->data());
-
-  auto ret = std::make_pair(*rcls, std::vector<borrowed_ptr<php::Class>>{});
-  for (auto& c : find_range(m_data->classInfo, name)) {
-    ret.second.push_back(const_cast<borrowed_ptr<php::Class>>(c.second->cls));
-  }
-  return ret;
-
-#endif
 }
 
 res::Class Index::builtin_class(SString name) const {

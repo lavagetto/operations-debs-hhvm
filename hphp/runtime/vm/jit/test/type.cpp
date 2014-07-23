@@ -98,6 +98,13 @@ TEST(Type, ToString) {
   EXPECT_EQ("Int", Type::Int.toString());
   EXPECT_EQ("Cell", Type::Cell.toString());
   EXPECT_EQ("BoxedDbl", Type::BoxedDbl.toString());
+
+
+  auto const sub = Type::Obj.specialize(SystemLib::s_IteratorClass);
+  auto const exact = Type::Obj.specializeExact(SystemLib::s_IteratorClass);
+
+  EXPECT_EQ("Obj<=Iterator", sub.toString());
+  EXPECT_EQ("Obj=Iterator", exact.toString());
 }
 
 TEST(Type, Boxes) {
@@ -137,50 +144,6 @@ TEST(Type, Subtypes) {
   EXPECT_FALSE(Type::TCA.subtypeOf(Type::Gen));
 
   EXPECT_TRUE(Type::PtrToCell.strictSubtypeOf(Type::PtrToGen));
-}
-
-TEST(Type, RuntimeType) {
-  auto sd = StringData::MakeMalloced("", 0);
-  SCOPE_EXIT { sd->destruct(); };
-
-  HPHP::JIT::RuntimeType rt(sd);
-  Type t = Type(rt);
-  EXPECT_TRUE(t.subtypeOf(Type::Str));
-  EXPECT_FALSE(t.subtypeOf(Type::Int));
-
-  rt = HPHP::JIT::RuntimeType(staticEmptyArray());
-  t = Type(rt);
-  EXPECT_TRUE(t.subtypeOf(Type::Arr));
-  EXPECT_FALSE(t.subtypeOf(Type::Str));
-
-  rt = HPHP::JIT::RuntimeType(true);
-  t = Type(rt);
-  EXPECT_TRUE(t.subtypeOf(Type::Bool));
-  EXPECT_FALSE(t.subtypeOf(Type::Obj));
-
-  rt = HPHP::JIT::RuntimeType((int64_t) 1);
-  t = Type(rt);
-  EXPECT_TRUE(t.subtypeOf(Type::Int));
-  EXPECT_FALSE(t.subtypeOf(Type::Dbl));
-
-  rt = HPHP::JIT::RuntimeType(DataType::KindOfObject,
-                              DataType::KindOfInvalid);
-  rt = rt.setKnownClass(SystemLib::s_TraversableClass);
-  t = Type(rt);
-  EXPECT_TRUE(t.subtypeOf(Type::Obj));
-  EXPECT_FALSE(Type::Obj.subtypeOf(t));
-  EXPECT_FALSE(Type::Int.subtypeOf(t));
-  HPHP::JIT::RuntimeType rt1 =
-    HPHP::JIT::RuntimeType(DataType::KindOfObject,
-                              DataType::KindOfInvalid);
-  rt1 = rt1.setKnownClass(SystemLib::s_IteratorClass);
-  Type t1 = Type(rt1);
-  EXPECT_TRUE(t1.subtypeOf(Type::Obj));
-  EXPECT_TRUE(t1.subtypeOf(t));
-  EXPECT_FALSE(Type::Obj.subtypeOf(t1));
-  EXPECT_FALSE(t.subtypeOf(t1));
-  EXPECT_FALSE(t.subtypeOf(Type::Str));
-  EXPECT_FALSE(Type::Int.subtypeOf(t));
 }
 
 TEST(Type, CanRunDtor) {
@@ -278,7 +241,7 @@ TEST(Type, RelaxType) {
   inner.innerCat = DataTypeSpecialized;
   inner.category = DataTypeSpecific;
   auto type = Type::Obj.specialize(SystemLib::s_IteratorClass).box();
-  EXPECT_EQ("BoxedObj<Iterator>", type.toString());
+  EXPECT_EQ("BoxedObj<=Iterator", type.toString());
   EXPECT_EQ(type, relaxType(type, inner));
 }
 
@@ -305,6 +268,38 @@ TEST(Type, Specialized) {
   EXPECT_GT(packed, Type::Bottom);
 
   EXPECT_TRUE(Type::Int <= (packed | Type::Int));
+}
+
+TEST(Type, SpecializedObjects) {
+  auto const A = SystemLib::s_IteratorClass;
+  auto const B = SystemLib::s_TraversableClass;
+  EXPECT_TRUE(A->classof(B));
+
+  auto const obj = Type::Obj;
+  auto const exactA = obj.specializeExact(A);
+  auto const exactB = obj.specializeExact(B);
+  auto const subA = obj.specialize(A);
+  auto const subB = obj.specialize(B);
+
+  EXPECT_EQ(exactA.getClass(), A);
+  EXPECT_EQ(subA.getClass(), A);
+
+  EXPECT_EQ(exactA.getExactClass(), A);
+  EXPECT_EQ(subA.getExactClass(), nullptr);
+
+  EXPECT_LE(exactA, exactA);
+  EXPECT_LE(subA, subA);
+
+  EXPECT_LT(exactA, obj);
+  EXPECT_LT(subA, obj);
+
+  EXPECT_LT(exactA, subA);
+
+  EXPECT_LT(exactA, subB);
+  EXPECT_LT(subA, subB);
+
+  EXPECT_FALSE(exactA <= exactB);
+  EXPECT_FALSE(subA <= exactB);
 }
 
 TEST(Type, Const) {
@@ -381,7 +376,7 @@ TEST(Type, Const) {
   EXPECT_NE(ratArray1, ratArray2);
 
   auto packedRat = packedArray & ratArray1;
-  EXPECT_EQ("Arr<PackedKind:N([Str])>", packedRat.toString());
+  EXPECT_EQ("Arr=PackedKind:N([Str])", packedRat.toString());
   EXPECT_TRUE(packedRat <= packedArray);
   EXPECT_TRUE(packedRat < packedArray);
   EXPECT_TRUE(packedRat <= ratArray1);

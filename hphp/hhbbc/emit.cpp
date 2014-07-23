@@ -30,10 +30,10 @@
 #include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/base/repo-auth-type-array.h"
 #include "hphp/runtime/base/repo-auth-type-codec.h"
-#include "hphp/runtime/vm/unit.h"
+#include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func-emitter.h"
 #include "hphp/runtime/vm/preclass-emitter.h"
-#include "hphp/runtime/vm/bytecode.h"
+#include "hphp/runtime/vm/unit-emitter.h"
 #include "hphp/hhbbc/representation.h"
 #include "hphp/hhbbc/cfg.h"
 #include "hphp/hhbbc/unit-util.h"
@@ -320,7 +320,7 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
       euState.defClsMap[id] = startOffset;
     };
 
-    auto nopdefcls = [&] {
+    auto defclsnop = [&] {
       auto const id = inst.DefCls.arg1;
       always_assert(euState.defClsMap[id] == kInvalidOffset);
       euState.defClsMap[id] = startOffset;
@@ -374,7 +374,7 @@ EmitBcInfo emit_bytecode(EmitUnitState& euState,
 #define O(opcode, imms, inputs, outputs, flags)                   \
     auto emit_##opcode = [&] (const bc::opcode& data) {           \
       if (Op::opcode == Op::DefCls)    defcls();                  \
-      if (Op::opcode == Op::NopDefCls) nopdefcls();               \
+      if (Op::opcode == Op::DefClsNop) defclsnop();               \
       if (isRet(Op::opcode))           ret_assert();              \
       ue.emitOp(Op::opcode);                                      \
       POP_##inputs                                                \

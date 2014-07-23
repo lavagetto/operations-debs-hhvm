@@ -13,39 +13,43 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/vm/jit/translator.h"
 
-// Translator front-end: parse instruction stream into basic blocks, decode
-// and normalize instructions. Propagate run-time type info to instructions
-// to annotate their inputs and outputs with types.
 #include <cinttypes>
 #include <assert.h>
-#include <stdint.h>
 #include <stdarg.h>
+#include <stdint.h>
 
-#include <vector>
-#include <string>
 #include <algorithm>
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
-#include "folly/Optional.h"
 #include "folly/Conv.h"
 #include "folly/MapUtil.h"
+#include "folly/Optional.h"
 
-#include "hphp/util/trace.h"
 #include "hphp/util/map-walker.h"
 #include "hphp/util/ringbuffer.h"
-#include "hphp/runtime/base/repo-auth-type-codec.h"
-#include "hphp/runtime/base/unit-cache.h"
+#include "hphp/util/timer.h"
+#include "hphp/util/trace.h"
+
 #include "hphp/runtime/base/arch.h"
+#include "hphp/runtime/base/repo-auth-type-codec.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/ext/ext_collections.h"
 #include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/hhbc.h"
+#include "hphp/runtime/vm/runtime.h"
+#include "hphp/runtime/vm/treadmill.h"
+#include "hphp/runtime/vm/type-profile.h"
+
 #include "hphp/runtime/vm/jit/annotation.h"
 #include "hphp/runtime/vm/jit/hhbc-translator.h"
 #include "hphp/runtime/vm/jit/ir-translator.h"
@@ -53,34 +57,23 @@
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/print.h"
+#include "hphp/runtime/vm/jit/prof-data.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/timer.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/translator-instrs.h"
 #include "hphp/runtime/vm/jit/type.h"
-#include "hphp/runtime/vm/runtime.h"
-#include "hphp/runtime/vm/treadmill.h"
-#include "hphp/runtime/vm/type-profile.h"
 
 #define KindOfUnknown DontUseKindOfUnknownInThisFile
 #define KindOfInvalid DontUseKindOfInvalidInThisFile
 
-namespace {
 TRACE_SET_MOD(trans);
-}
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace JIT {
+///////////////////////////////////////////////////////////////////////////////
 
 Lease Translator::s_writeLease;
 
-/*
- * locPhysicalOffset --
- *
- *   Return offset, in cells, of this location from its base
- *   pointer. It needs a function descriptor to see how many locals
- *   to skip for iterators; if the current frame pointer is not the context
- *   you're looking for, be sure to pass in a non-default f.
- */
 int locPhysicalOffset(Location l, const Func* f) {
   f = f ? f : liveFunc();
   assert_not_implemented(l.space == Location::Stack ||
@@ -90,9 +83,6 @@ int locPhysicalOffset(Location l, const Func* f) {
   int iterInflator = l.space == Location::Iter ? kNumIterCells : 1;
   return -((l.offset + 1) * iterInflator + localsToSkip);
 }
-
-// The global Translator object.
-Translator* tx;
 
 bool Translator::liveFrameIsPseudoMain() {
   ActRec* ar = (ActRec*)vmfp();
@@ -111,37 +101,21 @@ static uint32_t get_random()
 
 static const int kTooPolyRet = 6;
 
-bool
-isNormalPropertyAccess(const NormalizedInstruction& i,
-                       int propInput,
-                       int objInput) {
-  const LocationCode lcode = i.immVec.locationCode();
-  return
-    i.immVecM.size() == 1 &&
-    (lcode == LC || lcode == LL || lcode == LR || lcode == LH) &&
-    mcodeIsProp(i.immVecM[0]) &&
-    i.inputs[propInput]->isString() &&
-    i.inputs[objInput]->valueType() == KindOfObject;
-}
-
 PropInfo getPropertyOffset(const NormalizedInstruction& ni,
-                           Class* ctx,
-                           const Class*& baseClass,
+                           Class* ctx, const Class*& baseClass,
                            const MInstrInfo& mii,
                            unsigned mInd, unsigned iInd) {
   if (mInd == 0) {
     auto const baseIndex = mii.valCount();
-    baseClass = ni.inputs[baseIndex]->rtt.isObject()
-      ? ni.inputs[baseIndex]->rtt.valueClass()
+    baseClass = ni.inputs[baseIndex]->rtt < Type::Obj
+      ? ni.inputs[baseIndex]->rtt.getClass()
       : nullptr;
   }
   if (!baseClass) return PropInfo();
 
-  if (!ni.inputs[iInd]->rtt.isString()) {
-    return PropInfo();
-  }
-  auto* const name = ni.inputs[iInd]->rtt.valueString();
-  if (!name) return PropInfo();
+  auto keyType = ni.inputs[iInd]->rtt;
+  if (!keyType.isConst(Type::Str)) return PropInfo();
+  auto const name = keyType.strVal();
 
   bool accessible;
   // If we are not in repo-authoriative mode, we need to check that
@@ -179,13 +153,12 @@ PropInfo getPropertyOffset(const NormalizedInstruction& ni,
 }
 
 PropInfo getFinalPropertyOffset(const NormalizedInstruction& ni,
-                                Class* context,
-                                const MInstrInfo& mii) {
+                                Class* ctx, const MInstrInfo& mii) {
   unsigned mInd = ni.immVecM.size() - 1;
   unsigned iInd = mii.valCount() + 1 + mInd;
 
   const Class* cls = nullptr;
-  return getPropertyOffset(ni, context, cls, mii, mInd, iInd);
+  return getPropertyOffset(ni, ctx, cls, mii, mInd, iInd);
 }
 
 static folly::Optional<DataType>
@@ -327,15 +300,15 @@ predictOutputs(const NormalizedInstruction* ni) {
     // anything ** double => double
     // double ** anything => double
     // anything ** anything => int
-    auto lhs = ni->inputs[0];
-    auto rhs = ni->inputs[1];
+    auto lhs = ni->inputs[0]->rtt;
+    auto rhs = ni->inputs[1]->rtt;
 
-    if (lhs->valueType() == KindOfInt64 && rhs->valueType() == KindOfInt64) {
+    if (lhs <= Type::Int && rhs <= Type::Int) {
       // Best guess, since overflowing isn't common
       return KindOfInt64;
     }
 
-    if (lhs->valueType() == KindOfDouble || rhs->valueType() == KindOfDouble) {
+    if (lhs <= Type::Dbl || rhs <= Type::Dbl) {
       return KindOfDouble;
     }
 
@@ -351,33 +324,16 @@ predictOutputs(const NormalizedInstruction* ni) {
     // Integers can produce integers if there's no residue, but $i / $j in
     // general produces a double. $i / 0 produces boolean false, so we have
     // actually check the result.
-    auto lhs = ni->inputs[0];
-    auto rhs = ni->inputs[1];
-
-    if (lhs->valueType() == KindOfDouble || rhs->valueType() == KindOfDouble) {
-      return KindOfDouble;
-    }
-
-    if (rhs->isLiteral()) {
-      if (ni->imm[1].u_I64A == 0) return KindOfBoolean;
-      if (ni->imm[1].u_I64A == 1) return lhs->valueType();
-
-      if (rhs->isLiteral()) {
-        return ni->imm[0].u_I64A % ni->imm[1].u_I64A ? KindOfDouble
-                                                     : KindOfInt64;
-      }
-    }
-
     return KindOfDouble;
   }
 
   if (ni->op() == OpAbs) {
-    if (ni->inputs[0]->valueType() == KindOfDouble) {
+    if (ni->inputs[0]->rtt <= Type::Dbl) {
       return KindOfDouble;
     }
 
     // some types can't be converted to integers and will return false here
-    if (ni->inputs[0]->valueType() == KindOfArray) {
+    if (ni->inputs[0]->rtt <= Type::Arr) {
       return KindOfBoolean;
     }
 
@@ -411,7 +367,9 @@ predictOutputs(const NormalizedInstruction* ni) {
      * since MInstrTranslator side exits in all uncommon cases.
      */
 
-    auto const inDt = ni->inputs[0]->rtt.valueType();
+    auto inType = ni->inputs[0]->rtt;
+    auto const inDt = inType.isKnownDataType() ? inType.toDataType()
+                                               : KindOfAny;
     // If the base is a string, the output is probably a string. Unless the
     // member code is MW, then we're either going to fatal or promote the
     // string to an array.
@@ -424,7 +382,7 @@ predictOutputs(const NormalizedInstruction* ni) {
         break;
 
       default:
-        baseType = Type(ni->inputs[1]->rtt);
+        baseType = ni->inputs[1]->rtt;
     }
     if (baseType <= Type::Str && ni->immVecM.size() == 1) {
       return ni->immVecM[0] == MW ? inDt : KindOfString;
@@ -438,8 +396,9 @@ predictOutputs(const NormalizedInstruction* ni) {
   static const double kAccept = 1.0;
   std::pair<DataType, double> pred = std::make_pair(KindOfAny, 0.0);
   if (op == OpCGetS) {
-    const StringData* propName = ni->inputs[1]->rtt.valueStringOrNull();
-    if (propName) {
+    auto nameType = ni->inputs[1]->rtt;
+    if (nameType.isConst(Type::Str)) {
+      auto propName = nameType.strVal();
       pred = predictType(TypeProfileKey(TypeProfileKey::StaticPropName,
                                         propName));
       TRACE(1, "prediction for static fields named %s: %d, %f\n",
@@ -488,7 +447,6 @@ static const struct {
 
   /*** 1. Basic instructions ***/
 
-  { OpNop,         {None,             None,         OutNone,           0 }},
   { OpPopA,        {Stack1,           None,         OutNone,          -1 }},
   { OpPopC,        {Stack1|
                     DontGuardStack1,  None,         OutNone,          -1 }},
@@ -502,9 +460,7 @@ static const struct {
   { OpBox,         {Stack1,           Stack1,       OutVInput,         0 }},
   { OpUnbox,       {Stack1,           Stack1,       OutCInput,         0 }},
   { OpBoxR,        {Stack1,           Stack1,       OutVInput,         0 }},
-  { OpBoxRNop,     {None,             None,         OutNone,           0 }},
   { OpUnboxR,      {Stack1,           Stack1,       OutCInput,         0 }},
-  { OpUnboxRNop,   {None,             None,         OutNone,           0 }},
 
   /*** 2. Literal and constant instructions ***/
 
@@ -715,10 +671,8 @@ static const struct {
   { OpFPushCufSafe,{StackTop2|DontGuardAny,
                                       StackTop2|FStack, OutFPushCufSafe,
                                                          kNumActRecCells }},
-  { OpFPassC,      {FuncdRef,         None,         OutSameAsInput,    0 }},
   { OpFPassCW,     {FuncdRef,         None,         OutSameAsInput,    0 }},
   { OpFPassCE,     {FuncdRef,         None,         OutSameAsInput,    0 }},
-  { OpFPassVNop,   {None,             None,         OutNone,           0 }},
   { OpFPassV,      {Stack1|FuncdRef,  Stack1,       OutUnknown,        0 }},
   { OpFPassR,      {Stack1|FuncdRef,  Stack1,       OutFInputR,        0 }},
   { OpFPassL,      {Local|FuncdRef,   Stack1,       OutFInputL,        1 }},
@@ -774,7 +728,6 @@ static const struct {
   { OpDefFunc,     {None,             None,         OutNone,           0 }},
   { OpDefTypeAlias,{None,             None,         OutNone,           0 }},
   { OpDefCls,      {None,             None,         OutNone,           0 }},
-  { OpNopDefCls,   {None,             None,         OutNone,           0 }},
   { OpDefCns,      {Stack1,           Stack1,       OutBoolean,        0 }},
 
   /*** 13. Miscellaneous instructions ***/
@@ -979,12 +932,13 @@ bool outputIsPredicted(NormalizedInstruction& inst) {
 }
 
 bool isAlwaysNop(Op op) {
-  if (isTypeAssert(op)) return true;
   switch (op) {
-  case Op::UnboxRNop:
   case Op::BoxRNop:
-  case Op::FPassVNop:
+  case Op::DefClsNop:
   case Op::FPassC:
+  case Op::FPassVNop:
+  case Op::Nop:
+  case Op::UnboxRNop:
     return true;
   case Op::VerifyRetTypeC:
   case Op::VerifyRetTypeV:
@@ -1096,19 +1050,6 @@ static void addMVectorInputs(NormalizedInstruction& ni,
                         "inputs, %d locals\n", stackCount, localCount);
 }
 
-void getInputs(SrcKey startSk, NormalizedInstruction& inst, InputInfos& infos,
-               const Func* func, const LocalTypeFn& localType) {
-  // MCGenerator expected top of stack to be index -1, with indexes growing
-  // down from there. hhir defines top of stack to be index 0, with indexes
-  // growing up from there. To compensate we start with a stack offset of 1 and
-  // negate the index of any stack input after the call to getInputs.
-  int stackOff = 1;
-  getInputsImpl(startSk, &inst, stackOff, infos, func, localType);
-  for (auto& info : infos) {
-    if (info.loc.isStack()) info.loc.offset = -info.loc.offset;
-  }
-}
-
 /*
  * getInputsImpl --
  *   Returns locations for this instruction's inputs.
@@ -1123,15 +1064,17 @@ void getInputs(SrcKey startSk, NormalizedInstruction& inst, InputInfos& infos,
  *     Truncate the tracelet at the preceding instruction, which must
  *     exists because *something* modified something in it.
  */
+static
 void getInputsImpl(SrcKey startSk,
                    NormalizedInstruction* ni,
                    int& currentStackOffset,
-                   InputInfos& inputs,
-                   const Func* func,
+                   InputInfoVec& inputs,
                    const LocalTypeFn& localType) {
 #ifdef USE_TRACE
   const SrcKey& sk = ni->source;
 #endif
+  if (isAlwaysNop(ni->op())) return;
+
   assert(inputs.empty());
   always_assert_flog(
     instrInfo.count(ni->op()),
@@ -1252,6 +1195,19 @@ void getInputsImpl(SrcKey startSk,
   }
 }
 
+void getInputs(SrcKey startSk, NormalizedInstruction& inst,
+               InputInfoVec& infos, const LocalTypeFn& localType) {
+  // MCGenerator expected top of stack to be index -1, with indexes growing
+  // down from there. hhir defines top of stack to be index 0, with indexes
+  // growing up from there. To compensate we start with a stack offset of 1 and
+  // negate the index of any stack input after the call to getInputs.
+  int stackOff = 1;
+  getInputsImpl(startSk, &inst, stackOff, infos, localType);
+  for (auto& info : infos) {
+    if (info.loc.isStack()) info.loc.offset = -info.loc.offset;
+  }
+}
+
 bool dontGuardAnyInputs(Op op) {
   switch (op) {
 #define CASE(iNm) case Op ## iNm:
@@ -1267,8 +1223,8 @@ bool dontGuardAnyInputs(Op op) {
 #undef CASE
 }
 
-bool outputDependsOnInput(const Op instr) {
-  switch (instrInfo[instr].type) {
+bool outputDependsOnInput(const Op op) {
+  switch (instrInfo[op].type) {
     case OutNull:
     case OutNullUninit:
     case OutString:
@@ -1317,15 +1273,12 @@ bool outputDependsOnInput(const Op instr) {
   not_reached();
 }
 
-bool DynLocation::canBeAliased() const {
-  return isValue() &&
-    ((Translator::liveFrameIsPseudoMain() && isLocal()) || isRef());
-}
-
 const StaticString s_http_response_header("http_response_header");
 const StaticString s_php_errormsg("php_errormsg");
 const StaticString s_extract("extract");
 const StaticString s_extractNative("__SystemLib\\extract");
+const StaticString s_parse_str("parse_str");
+const StaticString s_parse_strNative("__SystemLib\\parse_str");
 
 bool callDestroysLocals(const NormalizedInstruction& inst,
                         const Func* caller) {
@@ -1339,8 +1292,11 @@ bool callDestroysLocals(const NormalizedInstruction& inst,
 
   auto* unit = caller->unit();
   auto checkTaintId = [&](Id id) {
-    return unit->lookupLitstrId(id)->isame(s_extract.get())
-    || unit->lookupLitstrId(id)->isame(s_extractNative.get());
+    auto const str = unit->lookupLitstrId(id);
+    return str->isame(s_extract.get()) ||
+           str->isame(s_extractNative.get()) ||
+           str->isame(s_parse_str.get()) ||
+           str->isame(s_parse_strNative.get());
   };
 
   if (inst.op() == OpFCallBuiltin) return checkTaintId(inst.imm[2].u_SA);
@@ -1370,15 +1326,15 @@ bool callDestroysLocals(const NormalizedInstruction& inst,
   return false;
 }
 
-bool instrBreaksProfileBB(const NormalizedInstruction* instr) {
-  if (instrIsNonCallControlFlow(instr->op()) ||
-      instr->outputPredicted ||
-      instr->op() == OpAwait || // may branch to scheduler and suspend execution
-      instr->op() == OpClsCnsD) { // side exits if misses in the RDS
+bool instrBreaksProfileBB(const NormalizedInstruction* inst) {
+  if (instrIsNonCallControlFlow(inst->op()) ||
+      inst->outputPredicted ||
+      inst->op() == OpAwait || // may branch to scheduler and suspend execution
+      inst->op() == OpClsCnsD) { // side exits if misses in the RDS
     return true;
   }
   // In profiling mode, don't trace through a control flow merge point
-  if (instr->func()->anyBlockEndsAt(instr->offset())) {
+  if (inst->func()->anyBlockEndsAt(inst->offset())) {
     return true;
   }
   return false;
@@ -1435,26 +1391,7 @@ Translator::addDbgBLPC(PC pc) {
   return true;
 }
 
-void populateImmediates(NormalizedInstruction& inst) {
-  auto offset = 1;
-  for (int i = 0; i < numImmediates(inst.op()); ++i) {
-    if (immType(inst.op(), i) == RATA) {
-      auto rataPc = inst.pc() + offset;
-      inst.imm[i].u_RATA = decodeRAT(inst.unit(), rataPc);
-    } else {
-      inst.imm[i] = getImm(reinterpret_cast<const Op*>(inst.pc()), i);
-    }
-    offset += immSize(reinterpret_cast<const Op*>(inst.pc()), i);
-  }
-  if (hasImmVector(*reinterpret_cast<const Op*>(inst.pc()))) {
-    inst.immVec = getImmVector(reinterpret_cast<const Op*>(inst.pc()));
-  }
-  if (inst.op() == OpFCallArray) {
-    inst.imm[0].u_IVA = 1;
-  }
-}
-
-const char* Translator::translateResultName(TranslateResult r) {
+const char* Translator::ResultName(TranslateResult r) {
   static const char* const names[] = {
     "Failure",
     "Retry",
@@ -1605,7 +1542,6 @@ static void findSuccOffsets(const RegionDesc&              region,
  */
 static bool containsBothSuccs(const OffsetSet&             succOffsets,
                               const NormalizedInstruction& inst) {
-  assert(inst.op() == OpJmpZ || inst.op() == OpJmpNZ);
   if (inst.breaksTracelet) return false;
   Offset takenOffset      = inst.offset() + inst.imm[0].u_BA;
   Offset fallthruOffset   = inst.offset() + instrLen((Op*)(inst.pc()));
@@ -1625,6 +1561,8 @@ static bool isMergePoint(Offset offset, const RegionDesc& region) {
       for (auto arc : region.arcs) {
         if (arc.dst == bid) inCount++;
       }
+      // NB: The initial block has an invisible "entry arc".
+      if (block == region.blocks[0]) ++inCount;
       if (inCount >= 2) return true;
     }
   }
@@ -1659,19 +1597,30 @@ static bool nextIsMerge(const NormalizedInstruction& inst,
   return isMergePoint(fallthruOffset, region);
 }
 
+/*
+ * True if there are no outgoing arcs from the block.
+ */
+static bool blockEndsRegion(RegionDesc::BlockId blockId,
+                            const RegionDesc& region) {
+  for (auto const& arc : region.arcs) {
+    if (arc.src == blockId) return false;
+  }
+  return true;
+}
+
 Translator::TranslateResult
 Translator::translateRegion(const RegionDesc& region,
                             bool bcControlFlow,
                             RegionBlacklist& toInterp,
                             TransFlags trflags) {
-  const Timer translateRegionTimer(Timer::translateRegion);
+  assert(!region.blocks.empty());
 
+  const Timer translateRegionTimer(Timer::translateRegion);
   FTRACE(1, "translateRegion starting with:\n{}\n", show(region));
+
   HhbcTranslator& ht = m_irTrans->hhbcTrans();
   IRBuilder& irb = ht.irBuilder();
-  assert(!region.blocks.empty());
-  const SrcKey startSk = region.blocks.front()->start();
-  auto profilingFunc = false;
+  auto const startSk = region.blocks.front()->start();
 
   BlockIdToIRBlockMap     blockIdToIRBlock;
   BlockIdToRegionBlockMap blockIdToRegionBlock;
@@ -1702,31 +1651,34 @@ Translator::translateRegion(const RegionDesc& region,
     if (ht.genMode() == IRGenMode::CFG) {
       Block* irBlock = blockIdToIRBlock[blockId];
       if (blockHasUnprocessedPred(region, blockId, processedBlocks)) {
+        always_assert(RuntimeOption::EvalJitLoops ||
+                      RuntimeOption::EvalJitPGORegionSelector == "wholecfg");
         irb.clearBlockState(irBlock);
+        irb.state().clearCurrentLocals();
       }
       ht.irBuilder().startBlock(irBlock);
       findSuccOffsets(region, blockId, blockIdToRegionBlock, succOffsets);
       setSuccIRBlocks(region, blockId, blockIdToIRBlock, blockIdToRegionBlock);
     }
-    ht.irBuilder().recordOffset(sk.offset());
 
     for (unsigned i = 0; i < block->length(); ++i, sk.advance(block->unit())) {
       // Update bcOff here so any guards or assertions from metadata are
       // attributed to this instruction.
       ht.setBcOff(sk.offset(), false);
 
-      // Emit prediction guards. If this is the first instruction in the
-      // region the guards will go to a retranslate request. Otherwise, they'll
-      // go to a side exit.
-      bool isFirstRegionInstr = block == region.blocks.front() && i == 0;
+      // Emit prediction guards. If this is the first instruction in the region
+      // the guards will go to a retranslate request. Otherwise, they'll go to
+      // a side exit.
+      bool isFirstRegionInstr = (block == region.blocks.front() && i == 0);
       if (isFirstRegionInstr) ht.emitRB(Trace::RBTypeTraceletGuards, sk);
 
+      // Emit type guards.
       while (typePreds.hasNext(sk)) {
         auto const& pred = typePreds.next();
         auto type = pred.type;
         auto loc  = pred.location;
         if (type <= Type::Cls) {
-          // Do not generate guards for class; instead assert the type
+          // Do not generate guards for class; instead assert the type.
           assert(loc.tag() == RegionDesc::Location::Tag::Stack);
           ht.assertType(loc, type);
         } else if (isFirstRegionInstr) {
@@ -1745,6 +1697,7 @@ Translator::translateRegion(const RegionDesc& region,
         ht.guardRefs(pred.arSpOffset, pred.mask, pred.vals);
       }
 
+      // Finish emitting guards, and emit profiling counters.
       if (isFirstRegionInstr) {
         ht.endGuards();
         if (RuntimeOption::EvalJitTransCounters) {
@@ -1752,14 +1705,12 @@ Translator::translateRegion(const RegionDesc& region,
         }
 
         if (m_mode == TransKind::Profile) {
-          profilingFunc = true;
           if (block->func()->isEntry(block->start().offset())) {
             ht.emitCheckCold(m_profData->curTransID());
           } else {
             ht.emitIncProfCounter(m_profData->curTransID());
           }
         }
-
         ht.emitRB(Trace::RBTypeTraceletBody, sk);
       }
 
@@ -1770,48 +1721,41 @@ Translator::translateRegion(const RegionDesc& region,
 
       // Create and initialize the instruction.
       NormalizedInstruction inst(sk, block->unit());
-      inst.breaksTracelet =
-        i == block->length() - 1 && block == region.blocks.back();
-      inst.changesPC = opcodeChangesPC(inst.op());
+      inst.breaksTracelet = (i == block->length() - 1 &&
+                             block == region.blocks.back());
       inst.funcd = topFunc;
       if (instrIsNonCallControlFlow(inst.op()) && !inst.breaksTracelet) {
         assert(b < region.blocks.size());
         inst.nextOffset = region.blocks[b+1]->start().offset();
       }
-      populateImmediates(inst);
       inst.nextIsMerge = nextIsMerge(inst, region);
-      if (inst.op() == OpJmpZ || inst.op() == OpJmpNZ) {
-        // TODO(t3730617): Could extend this logic to other
-        // conditional control flow ops, e.g., IterNext, etc.
-        inst.includeBothPaths = containsBothSuccs(succOffsets, inst);
-      }
+      inst.includeBothPaths = containsBothSuccs(succOffsets, inst);
 
       // We can get a more precise output type for interpOne if we know all of
       // its inputs, so we still populate the rest of the instruction even if
       // this is true.
       inst.interp = toInterp.count(ProfSrcKey{profTransId, sk});
 
-      InputInfos inputInfos;
-      getInputs(startSk, inst, inputInfos, block->func(), [&](int i) {
-          return ht.irBuilder().localType(i, DataTypeGeneric);
-        });
+      InputInfoVec inputInfos;
+      getInputs(startSk, inst, inputInfos, [&] (int i) {
+        return irb.localType(i, DataTypeGeneric);
+      });
 
       // Populate the NormalizedInstruction's input vector, using types from
       // HhbcTranslator.
       std::vector<DynLocation> dynLocs;
       dynLocs.reserve(inputInfos.size());
-      auto newDynLoc = [&](const InputInfo& ii) {
-        dynLocs.emplace_back(ii.loc, ht.rttFromLocation(ii.loc));
-        FTRACE(2, "rttFromLocation: {} -> {}\n",
-               ii.loc.pretty(), dynLocs.back().rtt.pretty());
+      auto newDynLoc = [&] (const InputInfo& ii) {
+        dynLocs.emplace_back(ii.loc, ht.typeFromLocation(ii.loc));
+        FTRACE(2, "typeFromLocation: {} -> {}\n",
+               ii.loc.pretty(), dynLocs.back().rtt);
         return &dynLocs.back();
       };
       FTRACE(2, "populating inputs for {}\n", inst.toString());
       for (auto const& ii : inputInfos) {
         inst.inputs.push_back(newDynLoc(ii));
       }
-      if (isAlwaysNop(inst.op())) inst.noOp = true;
-      if (!inst.noOp && inputInfos.needsRefCheck) {
+      if (inputInfos.needsRefCheck) {
         assert(byRefs.hasNext(sk));
         inst.preppedByRef = byRefs.next();
       }
@@ -1873,9 +1817,19 @@ Translator::translateRegion(const RegionDesc& region,
           // ...and also if this is the end of the block.
           if (i == block->length() - 1) return false;
 
+          auto nextSK = inst.nextSk();
+
+          // If the normal machinery is already inlining this function, don't
+          // do anything here.
+          if (i == block->length() - 2 &&
+              (nextSK.op() == Op::FCall || nextSK.op() == Op::FCallD) &&
+              block->inlinedCallee()) {
+            return false;
+          }
+
           // This is safe to do even if singleton inlining fails; we just won't
           // change topFunc in the next pass since hasNext() will return false.
-          if (knownFuncs.hasNext(inst.nextSk())) {
+          if (knownFuncs.hasNext(nextSK)) {
             topFunc = knownFuncs.next();
 
             // Detect a singleton pattern and inline it if found.
@@ -1929,11 +1883,14 @@ Translator::translateRegion(const RegionDesc& region,
           }
           ht.endBlock(nextOffset, inst.nextIsMerge);
         }
+        if (blockEndsRegion(blockId, region)) {
+          ht.end();
+        }
       }
 
       // Check the prediction. If the predicted type is less specific than what
       // is currently on the eval stack, checkType won't emit any code.
-      if (doPrediction && inst.outPred < ht.topType(0, DataTypeGeneric)) {
+      if (doPrediction && ht.topType(0, DataTypeGeneric).maybe(inst.outPred)) {
         ht.checkTypeStack(0, inst.outPred,
                           sk.advanced(block->unit()).offset());
       }
@@ -1957,8 +1914,10 @@ Translator::translateRegion(const RegionDesc& region,
   irGenTimer.end();
 
   try {
-    translatorTraceCodeGen();
-    if (profilingFunc) profData()->setProfiling(startSk.func()->getFuncId());
+    mcg->traceCodeGen();
+    if (m_mode == TransKind::Profile) {
+      profData()->setProfiling(startSk.func()->getFuncId());
+    }
   } catch (const FailedCodeGen& exn) {
     SrcKey sk{exn.vmFunc, exn.bcOff, exn.resumed};
     ProfSrcKey psk{exn.profTransId, sk};
@@ -2114,7 +2073,8 @@ const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
   return func;
 }
 
-} // HPHP::JIT
+///////////////////////////////////////////////////////////////////////////////
+}
 
 void invalidatePath(const std::string& path) {
   TRACE(1, "invalidatePath: abspath %s\n", path.c_str());
@@ -2133,4 +2093,5 @@ void invalidatePath(const std::string& path) {
   });
 }
 
+///////////////////////////////////////////////////////////////////////////////
 }

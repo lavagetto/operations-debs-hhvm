@@ -3,8 +3,8 @@
 option(ALWAYS_ASSERT "Enabled asserts in a release build" OFF)
 option(DEBUG_MEMORY_LEAK "Allow easier debugging of memory leaks" OFF)
 option(DEBUG_APC_LEAK "Allow easier debugging of apc leaks" OFF)
+option(STATIC_CXX_LIB "Statically link libstd++ and libgcc." OFF)
 
-option(HOTPROFILER "Enable support for the hot-profiler" OFF)
 option(EXECUTION_PROFILER "Enable the execution profiler" OFF)
 option(ENABLE_FULL_SETLINE "Enable full setline function for debugger and code-coverage" OFF)
 
@@ -17,6 +17,7 @@ option(USE_GOOGLE_CPU_PROFILER "Use Google cpu profiler" OFF)
 option(DISABLE_HARDWARE_COUNTERS "Disable hardware counters (for XenU systems)" OFF)
 
 option(ENABLE_TRACE "Enable tracing in release build" OFF)
+option(CPACK_GENERATOR "Enable build of distribution packages using CPack" OFF)
 
 IF (NOT APPLE)
   option(ENABLE_ZEND_COMPAT "Enable Zend source compatibility" ON)
