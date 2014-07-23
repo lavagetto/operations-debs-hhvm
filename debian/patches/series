@@ -1,11 +1,6 @@
-use_system_libzip
-use_system_libsqlite3
-use_system_lz4
-use_system_double_conversion
-remove_libpam
 fix_freetype_include
+remove_libpam
 typos
-public_headers_system
 
 # Wikimedia-specific patches
 Support-stream-wrappers-in-XML-parser-extensions-add-external-entity-loader.patch
