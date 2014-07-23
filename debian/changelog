@@ -1,3 +1,11 @@
+hhvm (3.1+20140723-1+wmf1) trusty-wikimedia; urgency=medium
+
+  * Refreshed the sources to the latest git master
+  * Init/upstart scripts
+  * Refreshed the list of patches we apply
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Wed, 23 Jul 2014 08:30:18 +0000
+
 hhvm (3.1+20140630-1+wm1) trusty-wikimedia; urgency=low
 
   [ David Martínez Moreno ]
