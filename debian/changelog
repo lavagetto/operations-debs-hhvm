@@ -1,3 +1,11 @@
+hhvm (3.3-dev+20140728) trusty-wikimedia; urgency=low
+
+  * Refreshed the source from the git master
+  * Added postinst/postrm hooks for update-alternatives
+  * Refreshed the list of patches we apply 
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Mon, 28 Jul 2014 13:23:42 +0200
+
 hhvm (3.1+20140723-1+wmf1) trusty-wikimedia; urgency=medium
 
   * Refreshed the sources to the latest git master

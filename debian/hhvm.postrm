@@ -1,0 +1,2 @@
+#!/bin/bash -e
+/usr/bin/update-alternatives --remove php /usr/bin/hhvm
