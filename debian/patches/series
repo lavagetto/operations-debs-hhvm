@@ -4,4 +4,3 @@ typos
 
 # Wikimedia-specific patches
 Support-stream-wrappers-in-XML-parser-extensions-add-external-entity-loader.patch
-EZC-fix-crash-due-to-EG-being-transmitted-between-requests.patch

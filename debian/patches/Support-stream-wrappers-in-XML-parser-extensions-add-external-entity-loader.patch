@@ -1,4 +1,4 @@
-From 8248cacba31c6d5b3059fafa9510c2f8cb65bd76 Mon Sep 17 00:00:00 2001
+From c3857d143af5d520d4002960163780e0ba01eed9 Mon Sep 17 00:00:00 2001
 From: bsimmers <bsimmers@fb.com>
 Date: Mon, 21 Jul 2014 17:24:57 -0700
 Subject: [PATCH] Support stream wrappers in XML parser extensions, add
@@ -48,11 +48,11 @@ entity loading fails by default
  hphp/doc/inconsistencies                           |   5 +
  hphp/runtime/base/stream-wrapper-registry.cpp      |  23 +-
  hphp/runtime/base/stream-wrapper-registry.h        |   2 +
- hphp/runtime/ext/ext_domdocument.cpp               |  81 ++++---
- hphp/runtime/ext/ext_simplexml.cpp                 |  23 +-
+ hphp/runtime/ext/ext_domdocument.cpp               |  82 ++++---
+ hphp/runtime/ext/ext_simplexml.cpp                 |  43 +++-
  hphp/runtime/ext/ext_xml.cpp                       |   2 +-
  hphp/runtime/ext/ext_xmlreader.cpp                 |  16 ++
- hphp/runtime/ext/libxml/ext_libxml.cpp             | 243 +++++++++++++++++++--
+ hphp/runtime/ext/libxml/ext_libxml.cpp             | 241 +++++++++++++++++++--
  hphp/runtime/ext/libxml/ext_libxml.h               |   4 +
  hphp/runtime/ext/libxml/ext_libxml.php             |   4 +
  hphp/runtime/ext/stream/ext_stream.cpp             |   4 +-
@@ -72,7 +72,11 @@ entity loading fails by default
  .../zend/good/ext/libxml/tests/004.php.expectf     |  29 +++
  hphp/test/zend/good/ext/libxml/tests/bug63389.php  |   6 +
  .../good/ext/libxml/tests/bug63389.php.expectf     |   3 +
+ .../tests/libxml_disable_entity_loader.php.ini     |   1 +
  hphp/test/zend/good/ext/libxml/tests/test.xml      |   8 +
+ .../test/zend/good/ext/xmlreader/tests/007.php.ini |   1 +
+ .../test/zend/good/ext/xmlreader/tests/008.php.ini |   1 +
+ .../test/zend/good/ext/xmlreader/tests/012.php.ini |   1 +
  hphp/test/zend/good/ext/xsl/tests/bug53965.php     |  15 ++
  .../zend/good/ext/xsl/tests/bug53965.php.expectf   |   4 +
  hphp/test/zend/good/ext/xsl/tests/bug53965.php.ini |   1 +
@@ -85,7 +89,7 @@ entity loading fails by default
  .../zend/good/ext/xsl/tests/xslt008.php.norepo     |   0
  .../zend/good/ext/xsl/tests/xslt008.php.skipif     |   4 +
  hphp/util/trace.h                                  |   3 +-
- 40 files changed, 492 insertions(+), 163 deletions(-)
+ 44 files changed, 515 insertions(+), 163 deletions(-)
  create mode 100644 hphp/test/quick/xml_entity_loader.php
  create mode 100644 hphp/test/quick/xml_entity_loader.php.expect
  create mode 100644 hphp/test/slow/dom_document/xinclude.php.ini
@@ -100,7 +104,11 @@ entity loading fails by default
  create mode 100644 hphp/test/zend/good/ext/libxml/tests/004.php.expectf
  create mode 100644 hphp/test/zend/good/ext/libxml/tests/bug63389.php
  create mode 100644 hphp/test/zend/good/ext/libxml/tests/bug63389.php.expectf
+ create mode 100644 hphp/test/zend/good/ext/libxml/tests/libxml_disable_entity_loader.php.ini
  create mode 100644 hphp/test/zend/good/ext/libxml/tests/test.xml
+ create mode 100644 hphp/test/zend/good/ext/xmlreader/tests/007.php.ini
+ create mode 100644 hphp/test/zend/good/ext/xmlreader/tests/008.php.ini
+ create mode 100644 hphp/test/zend/good/ext/xmlreader/tests/012.php.ini
  create mode 100644 hphp/test/zend/good/ext/xsl/tests/bug53965.php
  create mode 100644 hphp/test/zend/good/ext/xsl/tests/bug53965.php.expectf
  create mode 100644 hphp/test/zend/good/ext/xsl/tests/bug53965.php.ini
@@ -195,7 +203,7 @@ index fdb3a9e..5a67f0d 100644
  Wrapper* getWrapperFromURI(const String& uri,
                             int* pathIndex = nullptr, bool warn = true);
 diff --git a/hphp/runtime/ext/ext_domdocument.cpp b/hphp/runtime/ext/ext_domdocument.cpp
-index 687de2c..9f5a4bf 100644
+index 687de2c..147efad 100644
 --- a/hphp/runtime/ext/ext_domdocument.cpp
 +++ b/hphp/runtime/ext/ext_domdocument.cpp
 @@ -634,7 +634,7 @@ static xmlNsPtr dom_get_ns(xmlNodePtr nodep, const char *uri, int *errorcode,
@@ -207,7 +215,7 @@ index 687de2c..9f5a4bf 100644
                                       int options) {
    xmlDocPtr ret = NULL;
    xmlParserCtxtPtr ctxt = NULL;
-@@ -651,27 +651,36 @@ static xmlDocPtr dom_document_parser(c_DOMDocument * domdoc, int mode,
+@@ -651,27 +651,37 @@ static xmlDocPtr dom_document_parser(c_DOMDocument * domdoc, int mode,
    if (mode == DOM_LOAD_FILE) {
      String file_dest = libxml_get_valid_file_path(source);
      if (!file_dest.empty()) {
@@ -218,13 +226,14 @@ index 687de2c..9f5a4bf 100644
 +      // reasons.
 +      auto stream = File::Open(file_dest, "rb");
 +      if (!stream.isInvalid()) {
-+        // We're storing a reference in the xmlParserCtxt
-+        stream.get()->incRefCount();
 +        ctxt = xmlCreateIOParserCtxt(nullptr, nullptr,
 +                                     libxml_streams_IO_read,
 +                                     libxml_streams_IO_close,
 +                                     stream.get(),
 +                                     XML_CHAR_ENCODING_NONE);
++
++        // We're storing a reference in the xmlParserCtxt
++        if (ctxt) stream.get()->incRefCount();
 +      }
      }
    } else {
@@ -257,7 +266,7 @@ index 687de2c..9f5a4bf 100644
        ctxt->directory =
          (char*)xmlCanonicPath((const xmlChar*)directory.c_str());
      }
-@@ -712,9 +721,15 @@ static xmlDocPtr dom_document_parser(c_DOMDocument * domdoc, int mode,
+@@ -712,9 +722,15 @@ static xmlDocPtr dom_document_parser(c_DOMDocument * domdoc, int mode,
      if (ctxt->recovery) {
        HHVM_FN(error_reporting)(old_error_reporting);
      }
@@ -276,7 +285,7 @@ index 687de2c..9f5a4bf 100644
      }
    } else {
      ret = NULL;
-@@ -734,8 +749,7 @@ static Variant dom_parse_document(c_DOMDocument *domdoc, const String& source,
+@@ -734,8 +750,7 @@ static Variant dom_parse_document(c_DOMDocument *domdoc, const String& source,
      return false;
    }
    xmlDoc *newdoc =
@@ -286,7 +295,7 @@ index 687de2c..9f5a4bf 100644
    if (!newdoc) {
      return false;
    }
-@@ -3353,12 +3367,7 @@ Variant c_DOMDocument::t_importnode(const Object& importednode,
+@@ -3353,12 +3368,7 @@ Variant c_DOMDocument::t_importnode(const Object& importednode,
  Variant c_DOMDocument::t_load(const String& filename,
                                int64_t options /* = 0 */) {
    SYNC_VM_REGS_SCOPED();
@@ -300,7 +309,7 @@ index 687de2c..9f5a4bf 100644
  }
  
  Variant c_DOMDocument::t_loadhtml(const String& source) {
-@@ -3368,12 +3377,7 @@ Variant c_DOMDocument::t_loadhtml(const String& source) {
+@@ -3368,12 +3378,7 @@ Variant c_DOMDocument::t_loadhtml(const String& source) {
  
  Variant c_DOMDocument::t_loadhtmlfile(const String& filename) {
    SYNC_VM_REGS_SCOPED();
@@ -314,7 +323,7 @@ index 687de2c..9f5a4bf 100644
  }
  
  Variant c_DOMDocument::t_loadxml(const String& source,
-@@ -3424,19 +3428,13 @@ Variant c_DOMDocument::t_save(const String& file, int64_t options /* = 0 */) {
+@@ -3424,19 +3429,13 @@ Variant c_DOMDocument::t_save(const String& file, int64_t options /* = 0 */) {
    xmlDocPtr docp = (xmlDocPtr)m_node;
    int bytes, format = 0, saveempty = 0;
  
@@ -335,7 +344,7 @@ index 687de2c..9f5a4bf 100644
    if (options & LIBXML_SAVE_NOEMPTYTAG) {
      xmlSaveNoEmptyTags = saveempty;
    }
-@@ -3450,14 +3448,9 @@ Variant c_DOMDocument::t_savehtmlfile(const String& file) {
+@@ -3450,14 +3449,9 @@ Variant c_DOMDocument::t_savehtmlfile(const String& file) {
    xmlDocPtr docp = (xmlDocPtr)m_node;
    int bytes, format = 0;
  
@@ -352,7 +361,7 @@ index 687de2c..9f5a4bf 100644
      return false;
    }
 diff --git a/hphp/runtime/ext/ext_simplexml.cpp b/hphp/runtime/ext/ext_simplexml.cpp
-index 235caf0..0609132 100644
+index 235caf0..a506179 100644
 --- a/hphp/runtime/ext/ext_simplexml.cpp
 +++ b/hphp/runtime/ext/ext_simplexml.cpp
 @@ -22,6 +22,7 @@
@@ -371,7 +380,7 @@ index 235caf0..0609132 100644
    Class* cls = class_from_name(class_name, "simplexml_load_string");
    if (!cls) {
      return init_null();
-@@ -1152,8 +1154,24 @@ Variant f_simplexml_load_file(const String& filename,
+@@ -1152,8 +1154,44 @@ Variant f_simplexml_load_file(const String& filename,
                                const String& class_name /* = "SimpleXMLElement" */,
                                int64_t options /* = 0 */, const String& ns /* = "" */,
                                bool is_prefix /* = false */) {
@@ -383,8 +392,28 @@ index 235caf0..0609132 100644
 +    return init_null();
 +  }
 +
-+  xmlDocPtr doc = xmlReadFile(filename.c_str(), nullptr, options);
-+  if (!doc) {
++  auto stream = File::Open(filename, "rb");
++  if (stream.isInvalid()) return false;
++
++  xmlDocPtr doc = nullptr;
++  xmlParserCtxtPtr ctxt = xmlCreateIOParserCtxt(nullptr, nullptr,
++                                                libxml_streams_IO_read,
++                                                libxml_streams_IO_close,
++                                                stream.get(),
++                                                XML_CHAR_ENCODING_NONE);
++  if (ctxt == nullptr) return false;
++  stream.get()->incRefCount();
++  SCOPE_EXIT { xmlFreeParserCtxt(ctxt); };
++
++  if (ctxt->directory == nullptr) {
++    ctxt->directory = xmlParserGetDirectory(filename.c_str());
++  }
++  xmlParseDocument(ctxt);
++  if (ctxt->wellFormed) {
++    doc = ctxt->myDoc;
++  } else {
++    xmlFreeDoc(ctxt->myDoc);
++    ctxt->myDoc = nullptr;
 +    return false;
 +  }
 +
@@ -398,7 +427,7 @@ index 235caf0..0609132 100644
  }
  
  ///////////////////////////////////////////////////////////////////////////////
-@@ -1198,6 +1216,7 @@ void c_SimpleXMLElement::t___construct(const String& data,
+@@ -1198,6 +1236,7 @@ void c_SimpleXMLElement::t___construct(const String& data,
                                         bool data_is_url /* = false */,
                                         const String& ns /* = "" */,
                                         bool is_prefix /* = false */) {
@@ -553,7 +582,7 @@ index 3d71769..2911309 100644
    if (!basenode.isNull()) {
      c_DOMNode *dombasenode = basenode.getTyped<c_DOMNode>();
 diff --git a/hphp/runtime/ext/libxml/ext_libxml.cpp b/hphp/runtime/ext/libxml/ext_libxml.cpp
-index 277d8ec..5b54860 100644
+index 277d8ec..7dada55 100644
 --- a/hphp/runtime/ext/libxml/ext_libxml.cpp
 +++ b/hphp/runtime/ext/libxml/ext_libxml.cpp
 @@ -17,9 +17,13 @@
@@ -630,7 +659,7 @@ index 277d8ec..5b54860 100644
  
  const StaticString
    s_LibXMLError("LibXMLError"),
-@@ -111,6 +121,185 @@ const StaticString
+@@ -111,6 +121,183 @@ const StaticString
    s_LIBXML_ERR_ERROR("LIBXML_ERR_ERROR"),
    s_LIBXML_ERR_FATAL("LIBXML_ERR_FATAL");
  
@@ -754,8 +783,6 @@ index 277d8ec..5b54860 100644
 +    return nullptr;
 +  }
 +
-+  if (tl_libxml_request_data->m_entity_loader_disabled) return nullptr;
-+
 +  return s_default_entity_loader(url, id, context);
 +}
 +
@@ -764,7 +791,7 @@ index 277d8ec..5b54860 100644
 +  ITRACE(1, "libxml_create_input_buffer({}, {})\n", URI, static_cast<int>(enc));
 +  Trace::Indent _i;
 +
-+  if (URI == nullptr) return nullptr;
++ if (tl_libxml_request_data->m_entity_loader_disabled || !URI) return nullptr;
 +
 +  Resource stream = libxml_streams_IO_open_wrapper(URI, "rb", true);
 +  if (stream.isInvalid()) return nullptr;
@@ -816,7 +843,7 @@ index 277d8ec..5b54860 100644
  bool libxml_use_internal_error() {
    return tl_libxml_request_data->m_use_error;
  }
-@@ -325,14 +514,6 @@ bool HHVM_FUNCTION(libxml_use_internal_errors, bool use_errors) {
+@@ -325,14 +512,6 @@ bool HHVM_FUNCTION(libxml_use_internal_errors, bool use_errors) {
    return ret;
  }
  
@@ -831,7 +858,7 @@ index 277d8ec..5b54860 100644
  bool HHVM_FUNCTION(libxml_disable_entity_loader, bool disable /* = true */) {
    bool old = tl_libxml_request_data->m_entity_loader_disabled;
  
-@@ -341,6 +522,13 @@ bool HHVM_FUNCTION(libxml_disable_entity_loader, bool disable /* = true */) {
+@@ -341,6 +520,13 @@ bool HHVM_FUNCTION(libxml_disable_entity_loader, bool disable /* = true */) {
    return old;
  }
  
@@ -845,7 +872,7 @@ index 277d8ec..5b54860 100644
  class LibXMLExtension : public Extension {
    public:
      LibXMLExtension() : Extension("libxml") {}
-@@ -356,6 +544,22 @@ class LibXMLExtension : public Extension {
+@@ -356,6 +542,22 @@ class LibXMLExtension : public Extension {
            name.get(), StaticString(value).get());
      }
  
@@ -868,7 +895,7 @@ index 277d8ec..5b54860 100644
      void moduleInit() override {
        cnsInt(s_LIBXML_VERSION, LIBXML_VERSION);
        cnsStr(s_LIBXML_DOTTED_VERSION, LIBXML_DOTTED_VERSION);
-@@ -404,11 +608,18 @@ class LibXMLExtension : public Extension {
+@@ -404,11 +606,18 @@ class LibXMLExtension : public Extension {
        HHVM_FE(libxml_clear_errors);
        HHVM_FE(libxml_use_internal_errors);
        HHVM_FE(libxml_disable_entity_loader);
@@ -1219,6 +1246,13 @@ index 0000000..2e6f303
 +Warning: %s
 +okey
 \ No newline at end of file
+diff --git a/hphp/test/zend/good/ext/libxml/tests/libxml_disable_entity_loader.php.ini b/hphp/test/zend/good/ext/libxml/tests/libxml_disable_entity_loader.php.ini
+new file mode 100644
+index 0000000..be9eec1
+--- /dev/null
++++ b/hphp/test/zend/good/ext/libxml/tests/libxml_disable_entity_loader.php.ini
+@@ -0,0 +1 @@
++hhvm.libxml.ext_entity_whitelist = "file"
 diff --git a/hphp/test/zend/good/ext/libxml/tests/test.xml b/hphp/test/zend/good/ext/libxml/tests/test.xml
 new file mode 100644
 index 0000000..fc1d328
@@ -1233,6 +1267,27 @@ index 0000000..fc1d328
 +		<title>learn PHP easily</title>
 +	</book>
 +</library>
+diff --git a/hphp/test/zend/good/ext/xmlreader/tests/007.php.ini b/hphp/test/zend/good/ext/xmlreader/tests/007.php.ini
+new file mode 100644
+index 0000000..be9eec1
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xmlreader/tests/007.php.ini
+@@ -0,0 +1 @@
++hhvm.libxml.ext_entity_whitelist = "file"
+diff --git a/hphp/test/zend/good/ext/xmlreader/tests/008.php.ini b/hphp/test/zend/good/ext/xmlreader/tests/008.php.ini
+new file mode 100644
+index 0000000..be9eec1
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xmlreader/tests/008.php.ini
+@@ -0,0 +1 @@
++hhvm.libxml.ext_entity_whitelist = "file"
+diff --git a/hphp/test/zend/good/ext/xmlreader/tests/012.php.ini b/hphp/test/zend/good/ext/xmlreader/tests/012.php.ini
+new file mode 100644
+index 0000000..be9eec1
+--- /dev/null
++++ b/hphp/test/zend/good/ext/xmlreader/tests/012.php.ini
+@@ -0,0 +1 @@
++hhvm.libxml.ext_entity_whitelist = "file"
 diff --git a/hphp/test/zend/good/ext/xsl/tests/bug53965.php b/hphp/test/zend/good/ext/xsl/tests/bug53965.php
 new file mode 100644
 index 0000000..2450b3c

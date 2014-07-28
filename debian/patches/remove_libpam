@@ -5,6 +5,7 @@ Author: David Martínez Moreno <ender@debian.org>
 Forwarded: https://github.com/facebook/hhvm/pull/2085
 Last-Update: 2014-05-26
 
+
 --- a/CMake/FindLibpam.cmake
 +++ /dev/null
 @@ -1,23 +0,0 @@
@@ -33,7 +34,7 @@ Last-Update: 2014-05-26
 -)
 --- a/CMake/HPHPFindLibs.cmake
 +++ b/CMake/HPHPFindLibs.cmake
-@@ -305,11 +305,6 @@ if (ELF_GETSHDRSTRNDX)
+@@ -327,11 +327,6 @@ if (ELF_GETSHDRSTRNDX)
    add_definitions("-DHAVE_ELF_GETSHDRSTRNDX")
  endif()
  
@@ -45,7 +46,7 @@ Last-Update: 2014-05-26
  FIND_LIBRARY(CRYPT_LIB NAMES xcrypt crypt crypto)
  if (LINUX OR FREEBSD)
    FIND_LIBRARY (RT_LIB rt)
-@@ -473,10 +468,6 @@ macro(hphp_link target)
+@@ -516,10 +511,6 @@ macro(hphp_link target)
      target_link_libraries(${target} ${READLINE_LIBRARY})
    endif()
  
