@@ -28,14 +28,22 @@
 #include <vector>
 
 extern "C" {
+#ifndef _MSC_VER
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#else
+#include <winsock2.h>
+#include <ws2tcpip.h>
+// missing in socket headers
+#define sa_family_t ADDRESS_FAMILY
+#endif
+
 #include <sys/types.h>
 }
 
-#include "folly/Conv.h"
-#include "folly/Format.h"
+#include <folly/Conv.h>
+#include <folly/Format.h>
 
 namespace folly { namespace detail {
 

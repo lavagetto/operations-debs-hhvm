@@ -1457,12 +1457,13 @@ void Translator::createBlockMaps(const RegionDesc&        region,
   IRBuilder& irb = ht.irBuilder();
   blockIdToIRBlock.clear();
   blockIdToRegionBlock.clear();
-  for (auto regionBlock : region.blocks) {
-    RegionDesc::Block* rBlock = regionBlock.get();
+  for (unsigned i = 0; i < region.blocks.size(); i++) {
+    RegionDesc::Block* rBlock = region.blocks[i].get();
     auto id = rBlock->id();
-    Offset bcOff = rBlock->start().offset();
-    Block* iBlock = bcOff == irb.unit().bcOff() ? irb.unit().entry()
-                                                : irb.unit().defBlock();
+    DEBUG_ONLY Offset bcOff = rBlock->start().offset();
+    assert(IMPLIES(i == 0, bcOff == irb.unit().bcOff()));
+    Block* iBlock = i == 0 ? irb.unit().entry()
+                           : irb.unit().defBlock();
     blockIdToIRBlock[id]     = iBlock;
     blockIdToRegionBlock[id] = rBlock;
     FTRACE(1,
@@ -1660,6 +1661,7 @@ Translator::translateRegion(const RegionDesc& region,
       findSuccOffsets(region, blockId, blockIdToRegionBlock, succOffsets);
       setSuccIRBlocks(region, blockId, blockIdToIRBlock, blockIdToRegionBlock);
     }
+    ht.irBuilder().recordOffset(sk.offset());
 
     for (unsigned i = 0; i < block->length(); ++i, sk.advance(block->unit())) {
       // Update bcOff here so any guards or assertions from metadata are
