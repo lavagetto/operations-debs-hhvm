@@ -51,7 +51,7 @@ IRBuilder::IRBuilder(Offset initialSpOffsetFromFp,
                      const Func* func)
   : m_unit(unit)
   , m_simplifier(unit)
-  , m_state(unit, initialSpOffsetFromFp, func, func->numLocals())
+  , m_state(unit, initialSpOffsetFromFp, func)
   , m_curBlock(m_unit.entry())
   , m_enableSimplification(false)
   , m_constrainGuards(shouldHHIRRelaxGuards())
@@ -1202,6 +1202,14 @@ Block* IRBuilder::makeBlock(Offset offset) {
 
 bool IRBuilder::blockExists(Offset offset) {
   return m_offsetToBlockMap.count(offset);
+}
+
+bool IRBuilder::blockIsIncompatible(Offset offset) {
+  return m_offsetSeen.count(offset) && !RuntimeOption::EvalJitLoops;
+}
+
+void IRBuilder::recordOffset(Offset offset) {
+  m_offsetSeen.insert(offset);
 }
 
 void IRBuilder::resetOffsetMapping() {

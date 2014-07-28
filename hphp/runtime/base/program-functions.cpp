@@ -88,6 +88,12 @@
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/compiler/builtin_symbols.h"
 
+#if (defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER))
+#undef NOUSER
+#include <windows.h>
+#include <winuser.h>
+#endif
+
 using namespace boost::program_options;
 using std::cout;
 extern char **environ;
@@ -1291,9 +1297,14 @@ static int execute_program_impl(int argc, char** argv) {
       if (stackSizeMinimum > rlim.rlim_max) {
         rlim.rlim_max = stackSizeMinimum;
       }
+#ifdef __CYGWIN__
+      Logger::Error("stack limit too small, use peflags -x to increase  %zd\n",
+                    stackSizeMinimum);
+#else
       if (setrlimit(RLIMIT_STACK, &rlim)) {
         Logger::Error("failed to set stack limit to %zd\n", stackSizeMinimum);
       }
+#endif
     }
   }
 
@@ -1513,12 +1524,18 @@ string get_systemlib(string* hhas, const string &section /*= "systemlib" */,
   embedded_data desc;
   if (!get_embedded_data(section.c_str(), &desc, filename)) return "";
 
+#if (defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER))
+  string ret = systemlib_split(std::string(
+                                (const char*)LockResource(desc.m_handle),
+                                desc.m_len), hhas);
+#else
   std::ifstream ifs(desc.m_filename);
   if (!ifs.good()) return "";
   ifs.seekg(desc.m_start, std::ios::beg);
   std::unique_ptr<char[]> data(new char[desc.m_len]);
   ifs.read(data.get(), desc.m_len);
   string ret = systemlib_split(string(data.get(), desc.m_len), hhas);
+#endif
   return ret;
 }
 

@@ -893,16 +893,18 @@ let missing_constructor pos =
 
 let typedef_trail_entry pos = pos, "Typedef definition comes from here"
 
-let add_with_trail pos s trail =
-  add_list ((pos, s) :: List.map typedef_trail_entry trail)
+let add_with_trail errs trail =
+ add_list (errs @ List.map typedef_trail_entry trail)
 
-let enum_constant_type_bad pos ty trail =
-  add_with_trail pos ("Enum constants must be an int or string, not " ^ ty)
+let enum_constant_type_bad pos ty_pos ty trail =
+  add_with_trail
+    [pos, "Enum constants must be an int or string";
+     ty_pos, "Not " ^ ty]
     trail
 
 let enum_type_bad pos ty trail =
-  add_with_trail pos
-    ("Enums must have int, string, or mixed type, not " ^ ty)
+  add_with_trail
+    [pos, "Enums must have int, string, or mixed type, not " ^ ty]
     trail
 
 let enum_type_typedef_mixed pos =
@@ -915,10 +917,11 @@ let invalid_shape_field_name p =
   add p
     "Was expecting a constant string or class constant (for shape access)"
 
-let invalid_shape_field_type p ty =
-  add p
-    ("Only string and int constants can be used for shape fields, " ^
-        "but found " ^ ty)
+let invalid_shape_field_type pos ty_pos ty trail =
+  add_with_trail
+    [pos, "A shape field name must be an int or string";
+     ty_pos, "Not " ^ ty]
+    trail
 
 let invalid_shape_field_literal key_pos witness_pos =
   add_list [key_pos, "Shape uses literal string as field name";
