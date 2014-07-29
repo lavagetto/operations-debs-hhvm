@@ -64,6 +64,7 @@ Vcs-Browser: http://anonscm.debian.org/gitweb/?p=collab-maint/hhvm.git;a=summary
 Package: hhvm
 Architecture: amd64
 Depends: ${shlibs:Depends}, ${misc:Depends}
+Provides: ${hhvm:ApiVersion}
 Description: HipHop Virtual Machine, a JIT replacement for PHP
  HHVM is a new open-source virtual machine designed for executing programs
  written in PHP. HHVM uses a just-in-time (JIT) compilation approach to
@@ -97,7 +98,7 @@ Description: HipHop Virtual Machine, a JIT replacement for PHP
 
 Package: hhvm-dev
 Architecture: amd64
-Depends: ${misc:Depends}, cmake
+Depends: hhvm (= ${binary:Version}), ${misc:Depends}, cmake
 Section: libdevel
 Priority: extra
 Description: HipHop Virtual Machine, a JIT replacement for PHP

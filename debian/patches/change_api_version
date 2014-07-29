@@ -1,0 +1,19 @@
+Description: Make HHVM_API_VERSION meaningful.
+ At present, HHVM devs do not update the HHVM_API_VERSION to reflect
+ changes in ABI compatibility, and this is a nightmare for getting
+ dependencies right when building extensions. So we do this
+ artificially to guarantee ABI compatibility.
+Author: Giuseppe Lavagetto <glavagetto@wikimedia.org>
+Last-Update: 2014-07-30
+
+--- a/hphp/runtime/ext/extension.h
++++ b/hphp/runtime/ext/extension.h
+@@ -113,7 +113,7 @@ private:
+   std::string m_dsoName;
+ };
+ 
+-#define HHVM_API_VERSION 20140702L
++#define HHVM_API_VERSION 20140727L
+ 
+ #ifdef HHVM_BUILD_DSO
+ #define HHVM_GET_MODULE(name) \

@@ -1,7 +1,9 @@
 fix_freetype_include
 remove_libpam
 typos
+change_api_version
+fix_fastcgi_handling
 
 # Wikimedia-specific patches
 Support-stream-wrappers-in-XML-parser-extensions-add-external-entity-loader.patch
-fix_fastcgi_handling
+ExposeApiVersion

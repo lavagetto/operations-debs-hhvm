@@ -4,6 +4,7 @@
 #export DH_VERBOSE=1
 export LDFLAGS='-Wl,--as-needed'
 
+
 %:
 	dh $@ --parallel
 
@@ -29,5 +30,10 @@ endif
 
 override_dh_strip:
 	dh_strip --dbg-package=hhvm-dbg
+
+override_dh_gencontrol:
+	hhvmapi=$(shell ./debian/hhvm/usr/bin/hhvm --version | sed -ne 's/^Extension API:\ //p'); \
+		echo "hhvm:ApiVersion=hhvm-api-$(hhvmapi)" >> debian/hhvm.substvars
+	dh_gencontrol
 
 .PHONY: override_dh_auto_build override_dh_auto_configure override_dh_auto_test override_dh_strip
