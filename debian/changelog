@@ -1,3 +1,12 @@
+hhvm (3.3-dev+20140728+wmf3) trusty-wikimedia; urgency=low
+
+  * lintian fixes
+  * Added patch to show api version in hhvm --version
+  * Added patch for the fastcgi instability
+  * Removed the .gitreview file that will make gbp fail
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Mon, 04 Aug 15:00:15 +0200
+
 hhvm (3.3-dev+20140728) trusty-wikimedia; urgency=low
 
   * Refreshed the source from the git master
