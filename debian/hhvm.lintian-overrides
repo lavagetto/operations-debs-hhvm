@@ -1,2 +1,4 @@
 hhvm: spelling-error-in-binary usr/bin/hhvm tEH the
 hhvm: spelling-error-in-binary usr/bin/hhvm taht that
+hhvm: binary-without-manpage usr/bin/hhvm
+hhvm-dev: binary-without-manpage usr/bin/hphpize 

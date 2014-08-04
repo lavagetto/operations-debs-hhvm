@@ -1,2 +1,11 @@
 #!/bin/bash -e
-/usr/bin/update-alternatives --install /usr/bin/php php /usr/bin/hhvm 60
+case ${1} in
+    configure)
+        # The alternative should only be installed in the configuration phase
+        update-alternatives --install /usr/bin/php php /usr/bin/hhvm 60
+        ;;
+    *)
+        ;;
+esac
+
+#DEBHELPER#

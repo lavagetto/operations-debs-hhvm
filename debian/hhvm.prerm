@@ -1,0 +1,10 @@
+#!/bin/bash -e
+case $1 in
+    remove)
+        update-alternatives --remove php /usr/bin/hhvm
+        ;;
+    *)
+        ;;
+esac
+
+#DEBHELPER#
