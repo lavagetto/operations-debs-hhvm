@@ -1,0 +1,222 @@
+--- a/hphp/runtime/server/fastcgi/fastcgi-server.cpp
++++ b/hphp/runtime/server/fastcgi/fastcgi-server.cpp
+@@ -119,11 +119,13 @@ void FastCGIConnection::readDataAvailable(size_t len) noexcept {
+ }
+ 
+ void FastCGIConnection::readEOF() noexcept {
+-  shutdownTransport();
++  m_session.close();
++  close();
+ }
+ 
+ void FastCGIConnection::readError(const TTransportException& ex) noexcept {
+-  shutdownTransport();
++  m_session.close();
++  close();
+ }
+ 
+ bool FastCGIConnection::hasReadDataAvailable() {
+@@ -160,7 +162,7 @@ void FastCGIConnection::onSessionError() {
+ }
+ 
+ void FastCGIConnection::onSessionClose() {
+-  shutdownTransport();
++  close();
+   m_shutdown = true;
+   if (m_writeCount == 0) {
+     delete this;
+diff --git a/hphp/runtime/server/fastcgi/fastcgi-server.h b/hphp/runtime/server/fastcgi/fastcgi-server.h
+index 8b7f451..f7d3d15 100644
+--- a/hphp/runtime/server/fastcgi/fastcgi-server.h
++++ b/hphp/runtime/server/fastcgi/fastcgi-server.h
+@@ -72,7 +72,7 @@ class FastCGIConnection
+   : public SocketConnection,
+     public apache::thrift::async::TAsyncTransport::ReadCallback,
+     public apache::thrift::async::TAsyncTransport::WriteCallback,
+-    public ProtocolSession::Callback {
++    public FastCGISession::Callback {
+ friend class FastCGITransport;
+ public:
+   FastCGIConnection(
+@@ -93,7 +93,7 @@ public:
+     newSessionHandler(int handler_id) override;
+   virtual void onSessionEgress(std::unique_ptr<folly::IOBuf> chain) override;
+   virtual void writeError(size_t bytes,
+-    const apache::thrift::transport::TTransportException& ex) 
++    const apache::thrift::transport::TTransportException& ex)
+     noexcept override;
+   virtual void writeSuccess() noexcept override;
+   virtual void onSessionError() override;
+diff --git a/hphp/runtime/server/fastcgi/fastcgi-session.cpp b/hphp/runtime/server/fastcgi/fastcgi-session.cpp
+index 0e87a84..1341e03 100644
+--- a/hphp/runtime/server/fastcgi/fastcgi-session.cpp
++++ b/hphp/runtime/server/fastcgi/fastcgi-session.cpp
+@@ -146,6 +146,10 @@ void FastCGITransaction::onComplete() {
+   m_session->handleComplete(m_requestId);
+ }
+ 
++void FastCGITransaction::close() {
++  if (m_requestId != 0) m_handler->onBodyComplete();
++}
++
+ bool FastCGITransaction::parseKeyValue(Cursor& cursor, size_t& available) {
+   if (m_phase == Phase::READ_KEY_LENGTH) {
+     if (parseKeyValueLength(cursor, available, m_keyLength)) {
+@@ -278,6 +282,12 @@ size_t FastCGISession::onIngress(const IOBuf* chain) {
+   return available - avail;
+ }
+ 
++void FastCGISession::close() {
++  for (auto& pair : m_transactions) {
++    pair.second->close();
++  }
++}
++
+ void FastCGISession::setMaxConns(int max_conns) {
+   assert(max_conns > 0);
+   m_maxConns = max_conns;
+diff --git a/hphp/runtime/server/fastcgi/fastcgi-session.h b/hphp/runtime/server/fastcgi/fastcgi-session.h
+index 22dfed0..50eec99 100644
+--- a/hphp/runtime/server/fastcgi/fastcgi-session.h
++++ b/hphp/runtime/server/fastcgi/fastcgi-session.h
+@@ -48,6 +48,8 @@ public:
+   void onStdErr(std::unique_ptr<folly::IOBuf> chain) override;
+   void onComplete() override;
+ 
++  void close();
++
+ private:
+   enum Phase {
+     READ_KEY_LENGTH,
+@@ -90,16 +92,31 @@ private:
+ };
+ 
+ 
+-class FastCGISession : public ProtocolSession {
+-friend class FastCGITransaction;
+-public:
++struct FastCGISession {
++  friend class FastCGITransaction;
++
++  struct Callback {
++    virtual ~Callback() {}
++
++    virtual std::shared_ptr<ProtocolSessionHandler>
++      newSessionHandler(int handler_id) = 0;
++    virtual void onSessionEgress(std::unique_ptr<folly::IOBuf> chain) = 0;
++    virtual void onSessionError() = 0;
++    virtual void onSessionClose() = 0;
++  };
++
+   typedef FastCGITransaction Transaction;
+-  typedef Transaction::RequestId RequestId;
++  typedef FastCGITransaction::RequestId RequestId;
+ 
+   FastCGISession();
+   virtual ~FastCGISession();
+ 
+-  virtual size_t onIngress(const folly::IOBuf* chain) override;
++  size_t onIngress(const folly::IOBuf* chain);
++  void close();
++
++  void setCallback(Callback* callback) {
++    m_callback = callback;
++  }
+ 
+   void setMaxConns(int max_conns);
+   void setMaxRequests(int max_requets);
+@@ -252,6 +269,7 @@ protected:
+   int m_maxConns;
+   int m_maxRequests;
+ 
++  Callback* m_callback;
+   TransactionMap m_transactions;
+ };
+ 
+diff --git a/hphp/runtime/server/fastcgi/protocol-session.h b/hphp/runtime/server/fastcgi/protocol-session.h
+index d4e7023..e06a877 100644
+--- a/hphp/runtime/server/fastcgi/protocol-session.h
++++ b/hphp/runtime/server/fastcgi/protocol-session.h
+@@ -24,29 +24,16 @@ namespace HPHP {
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-class ProtocolSession {
++/*class ProtocolSession {
+ public:
+-  class Callback {
+-  public:
+-    virtual ~Callback() {}
+-
+-    virtual std::shared_ptr<ProtocolSessionHandler>
+-      newSessionHandler(int handler_id) = 0;
+-    virtual void onSessionEgress(std::unique_ptr<folly::IOBuf> chain) = 0;
+-    virtual void onSessionError() = 0;
+-    virtual void onSessionClose() = 0;
+-  };
+ 
+   virtual ~ProtocolSession() {}
+ 
+   virtual size_t onIngress(const folly::IOBuf* chain) = 0;
+-  void setCallback(Callback* callback) {
+-    m_callback = callback;
+-  }
+ 
+ protected:
+   Callback* m_callback;
+-};
++};*/
+ 
+ ////////////////////////////////////////////////////////////////////////////////
+ }
+diff --git a/hphp/runtime/server/fastcgi/socket-connection.cpp b/hphp/runtime/server/fastcgi/socket-connection.cpp
+index 5e19596..de6a84a 100644
+--- a/hphp/runtime/server/fastcgi/socket-connection.cpp
++++ b/hphp/runtime/server/fastcgi/socket-connection.cpp
+@@ -43,14 +43,14 @@ SocketConnection::SocketConnection(
+ 
+ SocketConnection::~SocketConnection() {
+   assert(!m_sock->getReadCallback());
+-  shutdownTransport();
++  close();
+ }
+ 
+ void SocketConnection::timeoutExpired() noexcept {
+-  shutdownTransport();
++  close();
+ }
+ 
+-void SocketConnection::shutdownTransport() {
++void SocketConnection::close() {
+   m_sock->close();
+ }
+ 
+diff --git a/hphp/runtime/server/fastcgi/socket-connection.h b/hphp/runtime/server/fastcgi/socket-connection.h
+index 2f7ac2a..01125f8 100644
+--- a/hphp/runtime/server/fastcgi/socket-connection.h
++++ b/hphp/runtime/server/fastcgi/socket-connection.h
+@@ -45,7 +45,7 @@ public:
+   virtual void dumpConnectionState(uint8_t loglevel);
+ 
+   virtual bool shouldShutdown() { return false; }
+-  void shutdownTransport();
++  void close();
+ 
+ protected:
+   apache::thrift::transport::TSocketAddress m_localAddr;
+diff --git a/hphp/test/ext/test_fastcgi_protocol.cpp b/hphp/test/ext/test_fastcgi_protocol.cpp
+index fdd333a..ea801ce 100644
+--- a/hphp/test/ext/test_fastcgi_protocol.cpp
++++ b/hphp/test/ext/test_fastcgi_protocol.cpp
+@@ -102,7 +102,7 @@ void TestProtocolHandler::onHeadersComplete() {
+ 
+ ///////////////////////////////////////////////////////////////////////////////
+ 
+-class TestSessionCallback : public ProtocolSession::Callback {
++class TestSessionCallback : public FastCGISession::Callback {
+ public:
+   TestSessionCallback();
+   virtual ~TestSessionCallback() {}
+-- 
+1.8.1
+
