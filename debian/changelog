@@ -1,3 +1,11 @@
+hhvm (3.3-dev+20140728+wmf5) trusty-wikimedia; urgency=low
+
+  * debian/patches:
+    - new patch cherry-picked from upstream be5c75578:
+        ArrayObject-append-should-delegate-to-ArrayObject-of.patch
+
+ -- Filippo Giunchedi <fgiunchedi@wikimedia.org>  Mon, 18 Aug 2014 16:08:24 +0100
+
 hhvm (3.3-dev+20140728+wmf4) trusty-wikimedia; urgency=low
 
   * Add php5 to the 'provides' list for hhvm

@@ -7,3 +7,6 @@ fix_fastcgi_handling
 # Wikimedia-specific patches
 Support-stream-wrappers-in-XML-parser-extensions-add-external-entity-loader.patch
 ExposeApiVersion
+
+# cherry-picks from upstream
+ArrayObject-append-should-delegate-to-ArrayObject-of.patch
