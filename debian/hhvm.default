@@ -1,5 +1,5 @@
 HHVM_USER="www-data"
 HHVM_GROUP="www-data"
 HHVM_PORT=9000
-DAEMON_OPTS="${DAEMON_OPTS} -m server -vServer.Type=fastcgi -vServer.Port=${HHVM_PORT} -vServer.FileSocket=/run/hhvm/hhvm.sock --user ${HHVM_USER} --php --php-ini=/etc/hhvm/php.ini"
+DAEMON_OPTS="${DAEMON_OPTS} -m server -vServer.Type=fastcgi -vServer.Port=${HHVM_PORT} --user ${HHVM_USER} --php --config=/etc/hhvm/php.ini"
 export DAEMON_OPTS HHVM_USER HHVM_GROUP

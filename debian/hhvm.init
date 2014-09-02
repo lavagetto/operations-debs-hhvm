@@ -24,7 +24,7 @@ SCRIPTNAME=/etc/init.d/$NAME
 
 
 # set default values for default variables
-DAEMON_OPTS="-m server"
+DAEMON_OPTS=""
 HHVM_USER="www-data"
 HHVM_GROUP="www-data"
 HHVM_PORT=9000
@@ -42,7 +42,7 @@ HHVM_PORT=9000
 
 # Don't run if we are running upstart
 if init_is_upstart; then
-    exit 1
+	exit 1
 fi
 
 #
@@ -50,8 +50,8 @@ fi
 #
 do_check()
 {
-    # At the moment, no way to check config without some obscene hack
-    return 0
+	# At the moment, no way to check config without some obscene hack
+	return 0
 }
 
 #
@@ -59,6 +59,8 @@ do_check()
 #
 do_start()
 {
+	install -d -m0755 -o ${HHVM_USER} -g ${HHVM_GROUP} /run/hhvm
+	install -d -m0700 -o ${HHVM_USER} -g ${HHVM_GROUP} /var/cache/hhvm
 	# Return
 	#   0 if daemon has been started
 	#   1 if daemon was already running
@@ -101,21 +103,21 @@ do_stop()
 
 
 case "$1" in
-    start)
+	start)
 	[ "$VERBOSE" != no ] && log_daemon_msg "Starting $DESC" "$NAME"
 	do_check $VERBOSE
 	case "$?" in
-	    0)
+		0)
 		do_start
 		case "$?" in
-		    0|1) [ "$VERBOSE" != no ] && log_end_msg 0 ;;
-		    2) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
+			0|1) [ "$VERBOSE" != no ] && log_end_msg 0 ;;
+			2) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
 		esac
 		;;
-	    1) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
+		1) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
 	esac
 	;;
-    stop)
+	stop)
 	[ "$VERBOSE" != no ] && log_daemon_msg "Stopping $DESC" "$NAME"
 	do_stop
 	case "$?" in
@@ -123,10 +125,10 @@ case "$1" in
 		2) [ "$VERBOSE" != no ] && log_end_msg 1 ;;
 	esac
 	;;
-    status)
-        status_of_proc "$DAEMON" "$NAME" && exit 0 || exit $?
-        ;;
-    restart)
+	status)
+		status_of_proc "$DAEMON" "$NAME" && exit 0 || exit $?
+		;;
+	restart)
 	log_daemon_msg "Restarting $DESC" "$NAME"
 	do_stop
 	case "$?" in
@@ -144,8 +146,8 @@ case "$1" in
 		;;
 	esac
 	;;
-    *)
+	*)
 	echo "Usage: $SCRIPTNAME {start|stop|status|restart|reload|force-reload}" >&2
 	exit 1
-    ;;
+	;;
 esac

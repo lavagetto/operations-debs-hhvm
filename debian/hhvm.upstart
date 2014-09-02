@@ -10,15 +10,15 @@ pre-start script
    HHVM_USER="www-data"
    HHVM_GROUP="www-data"
    [ -r /etc/default/hhvm ] && . /etc/default/hhvm
-   mkdir -p -m0755 /run/hhvm/
-   chown ${HHVM_USER}:${HHVM_GROUP} /run/hhvm/
+   install -d -m0755 -o ${HHVM_USER} -g ${HHVM_GROUP} /run/hhvm
+   install -d -m0700 -o ${HHVM_USER} -g ${HHVM_GROUP} /var/cache/hhvm
 end script
 
 respawn
 script
     HHVM_USER="www-data"
     HHVM_GROUP="www-data"
-    DAEMON_OPTS="-m server"
+    DAEMON_OPTS=""
     [ -r /etc/default/hhvm ] && . /etc/default/hhvm
     /sbin/start-stop-daemon --quiet --start \
         --chuid $HHVM_USER:$HHVM_GROUP \
