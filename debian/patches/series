@@ -10,3 +10,4 @@ ExposeApiVersion
 
 # cherry-picks from upstream
 ArrayObject-append-should-delegate-to-ArrayObject-of.patch
+Fix-handling-of-pcre-overflow-expressions.patch

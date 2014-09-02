@@ -1,0 +1,129 @@
+From 968dfa256cef0f48c7b574857f105d5d8dd54703 Mon Sep 17 00:00:00 2001
+From: aravind <aravind@fb.com>
+Date: Mon, 18 Aug 2014 14:10:34 -0700
+Subject: [PATCH] Fix handling of pcre overflow expressions
+
+Summary: Couple of fixes to the handling of pcre compiled expressions that overflow the default pcre cache:
+
+s_pcre_globals should smart-free m_overflow at the end of the request, and should free() the set of overflow expressions themselves.
+
+Reviewed By: @markw65
+
+Differential Revision: D1503955
+---
+ hphp/runtime/base/preg.cpp                              | 13 ++++++++++++-
+ hphp/runtime/base/preg.h                                |  1 +
+ hphp/runtime/base/program-functions.cpp                 |  3 +++
+ hphp/runtime/base/program-functions.h                   |  1 +
+ hphp/test/slow/ext_preg/preg_cache_overflow.php         | 17 +++++++++++++++++
+ hphp/test/slow/ext_preg/preg_cache_overflow.php.expectf |  5 +++++
+ hphp/test/slow/ext_preg/preg_cache_overflow.php.opts    |  1 +
+ 7 files changed, 40 insertions(+), 1 deletion(-)
+ create mode 100644 hphp/test/slow/ext_preg/preg_cache_overflow.php
+ create mode 100644 hphp/test/slow/ext_preg/preg_cache_overflow.php.expectf
+ create mode 100644 hphp/test/slow/ext_preg/preg_cache_overflow.php.opts
+
+diff --git a/hphp/runtime/base/preg.cpp b/hphp/runtime/base/preg.cpp
+index c97ea05..5b9b4dc 100644
+--- a/hphp/runtime/base/preg.cpp
++++ b/hphp/runtime/base/preg.cpp
+@@ -57,8 +57,19 @@ pcre_cache_entry::~pcre_cache_entry() {
+   pcre_free(re);
+ }
+ 
++void PCREglobals::onSessionExit() {
++  for (auto entry: m_overflow) {
++    delete entry;
++  }
++  smart::vector<const pcre_cache_entry*>().swap(m_overflow);
++}
++
+ PCREglobals::~PCREglobals() {
+-  m_overflow.clear();
++  onSessionExit();
++}
++
++void pcre_session_exit() {
++  s_pcre_globals->onSessionExit();
+ }
+ 
+ void PCREglobals::cleanupOnRequestEnd(const pcre_cache_entry* ent) {
+diff --git a/hphp/runtime/base/preg.h b/hphp/runtime/base/preg.h
+index da2c1a6..4699214 100644
+--- a/hphp/runtime/base/preg.h
++++ b/hphp/runtime/base/preg.h
+@@ -70,6 +70,7 @@ class PCREglobals {
+   PCREglobals() { }
+   ~PCREglobals();
+   void cleanupOnRequestEnd(const pcre_cache_entry* ent);
++  void onSessionExit();
+   // pcre ini_settings
+   int64_t m_preg_backtrace_limit;
+   int64_t m_preg_recursion_limit;
+diff --git a/hphp/runtime/base/program-functions.cpp b/hphp/runtime/base/program-functions.cpp
+index 502daa3..63d1860 100644
+--- a/hphp/runtime/base/program-functions.cpp
++++ b/hphp/runtime/base/program-functions.cpp
+@@ -1791,6 +1791,9 @@ void hphp_session_exit() {
+     // reinitialize g_context here.
+     g_context.getCheck();
+ 
++    // Clean up pcre state at the end of the request.
++    pcre_session_exit();
++
+     mm.sweep();
+ 
+     // Destroy g_context again because ExecutionContext has
+diff --git a/hphp/runtime/base/program-functions.h b/hphp/runtime/base/program-functions.h
+index c623fa5..9c3e053 100644
+--- a/hphp/runtime/base/program-functions.h
++++ b/hphp/runtime/base/program-functions.h
+@@ -74,6 +74,7 @@ class ExecutionContext;
+ 
+ void pcre_init();
+ void pcre_reinit();
++void pcre_session_exit();
+ void hphp_process_init();
+ void hphp_session_init();
+
+diff --git a/hphp/test/slow/ext_preg/preg_cache_overflow.php b/hphp/test/slow/ext_preg/preg_cache_overflow.php
+new file mode 100644
+index 0000000..4106efe
+--- /dev/null
++++ b/hphp/test/slow/ext_preg/preg_cache_overflow.php
+@@ -0,0 +1,17 @@
++<?php
++
++$matches = 1;
++for ($i=1 ; $i < 1050 ; $i++) {
++  $db_name = 'dbs.'.rand();
++
++  if (preg_match("/^dbs\.(\d+)$/", $db_name, $match)) {
++    $db_num = $match[1];
++    $printable_db_name = preg_replace('/' .$db_num.'/', '%d', $db_name);
++    if (!$printable_db_name) {
++      var_dump("preg_replace returned false");
++      break;
++    }
++    ++$matches;
++  }
++}
++var_dump(sprintf("%d matches", $matches));
+diff --git a/hphp/test/slow/ext_preg/preg_cache_overflow.php.expectf b/hphp/test/slow/ext_preg/preg_cache_overflow.php.expectf
+new file mode 100644
+index 0000000..abf509a
+--- /dev/null
++++ b/hphp/test/slow/ext_preg/preg_cache_overflow.php.expectf
+@@ -0,0 +1,5 @@
++string(14) "100000 matches"
++string(14) "100000 matches"
++string(14) "100000 matches"
++string(14) "100000 matches"
++string(14) "100000 matches"
+diff --git a/hphp/test/slow/ext_preg/preg_cache_overflow.php.opts b/hphp/test/slow/ext_preg/preg_cache_overflow.php.opts
+new file mode 100644
+index 0000000..df6e913
+--- /dev/null
++++ b/hphp/test/slow/ext_preg/preg_cache_overflow.php.opts
+@@ -0,0 +1 @@
++-vEval.PCRETableSize=128 --count 5
