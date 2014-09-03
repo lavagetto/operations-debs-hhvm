@@ -1,3 +1,14 @@
+hhvm (3.3-dev+20140728+wmf6) trusty-wikimedia; urgency=low
+
+  * debian/patches:
+    - new patch cherry-picked from upstream 968dfa2:
+        Fix-handling-of-pcre-overflow-expressions.patch
+  * Added very basic php.ini file
+  * Fixes to upstart/init scripts
+    - now all relevant dirs are created on startup.
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Wed, 3 Sep 2014 07:48:20 +0200
+
 hhvm (3.3-dev+20140728+wmf5) trusty-wikimedia; urgency=low
 
   * debian/patches:
@@ -25,7 +36,7 @@ hhvm (3.3-dev+20140728) trusty-wikimedia; urgency=low
 
   * Refreshed the source from the git master
   * Added postinst/postrm hooks for update-alternatives
-  * Refreshed the list of patches we apply 
+  * Refreshed the list of patches we apply
 
  -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Mon, 28 Jul 2014 13:23:42 +0200
 
