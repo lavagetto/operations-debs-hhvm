@@ -1,3 +1,11 @@
+hhvm (3.3-dev+20140728+wmf7) trusty-wikimedia; urgency=low
+
+  * debian/patches:
+    - new patch cherry-picked from upstream 883860d:
+        Make-RUSAGE_THREAD-available-to-getrusage.patch
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Wed, 5 Sep 2014 13:45:07 +0200
+
 hhvm (3.3-dev+20140728+wmf6) trusty-wikimedia; urgency=low
 
   * debian/patches:
