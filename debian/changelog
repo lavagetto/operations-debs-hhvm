@@ -1,3 +1,9 @@
+hhvm (3.3.0-20140918+wmf1) trusty-wikimedia; urgency=medium
+
+  * New upstream version
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Thu, 18 Sep 2014 12:39:00 +0200
+
 hhvm (3.3-dev+20140728+wmf7) trusty-wikimedia; urgency=low
 
   * debian/patches:
