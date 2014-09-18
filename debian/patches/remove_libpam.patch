@@ -3,8 +3,7 @@ Description: Remove PAM dependency code.
  there's no need neither in HHVM or c-client to link against libpam.
 Author: David Martínez Moreno <ender@debian.org>
 Forwarded: https://github.com/facebook/hhvm/pull/2085
-Last-Update: 2014-05-26
-
+Last-Update: 2014-09-18
 
 --- a/CMake/FindLibpam.cmake
 +++ /dev/null
@@ -32,9 +31,11 @@ Last-Update: 2014-05-26
 -  PAM_INCLUDE_PATH
 -  PAM_LIBRARY
 -)
+diff --git a/CMake/HPHPFindLibs.cmake b/CMake/HPHPFindLibs.cmake
+index e298995..7356c00 100644
 --- a/CMake/HPHPFindLibs.cmake
 +++ b/CMake/HPHPFindLibs.cmake
-@@ -327,11 +327,6 @@ if (ELF_GETSHDRSTRNDX)
+@@ -331,10 +331,6 @@ if (ELF_GETSHDRSTRNDX)
    add_definitions("-DHAVE_ELF_GETSHDRSTRNDX")
  endif()
  
@@ -42,11 +43,10 @@ Last-Update: 2014-05-26
 -if (PAM_INCLUDE_PATH)
 -  include_directories(${PAM_INCLUDE_PATH})
 -endif()
--
- FIND_LIBRARY(CRYPT_LIB NAMES xcrypt crypt crypto)
- if (LINUX OR FREEBSD)
-   FIND_LIBRARY (RT_LIB rt)
-@@ -516,10 +511,6 @@ macro(hphp_link target)
+ 
+ # LLVM
+ find_package(LLVM)
+@@ -533,10 +529,6 @@ macro(hphp_link target)
      target_link_libraries(${target} ${READLINE_LIBRARY})
    endif()
  
@@ -56,4 +56,4 @@ Last-Update: 2014-05-26
 -
    target_link_libraries(${target} ${LIBDWARF_LIBRARIES})
    target_link_libraries(${target} ${LIBELF_LIBRARIES})
- endmacro()
+ 

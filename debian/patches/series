@@ -1,14 +1,6 @@
-fix_freetype_include
-remove_libpam
-typos
-change_api_version
-fix_fastcgi_handling
+remove_libpam.patch
+typos.patch
 
-# Wikimedia-specific patches
-Support-stream-wrappers-in-XML-parser-extensions-add-external-entity-loader.patch
-ExposeApiVersion
-
-# cherry-picks from upstream
-ArrayObject-append-should-delegate-to-ArrayObject-of.patch
-Fix-handling-of-pcre-overflow-expressions.patch
+# Wikimedia-specific (waiting for upstream merge)
 Make-RUSAGE_THREAD-available-to-getrusage.patch
+fix-sql-warning.patch
