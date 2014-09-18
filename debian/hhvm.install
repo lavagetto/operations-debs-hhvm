@@ -1,1 +1,2 @@
 usr/bin/hhvm
+debian/php.ini /etc/hhvm
