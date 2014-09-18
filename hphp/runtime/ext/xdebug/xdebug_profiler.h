@@ -19,9 +19,9 @@
 #define incl_HPHP_XDEBUG_PROFILER_H_
 
 #include "hphp/runtime/ext/xdebug/ext_xdebug.h"
-#include "hphp/runtime/ext/ext_hotprofiler.h"
+#include "hphp/runtime/ext/xdebug/xdebug_utils.h"
 
-#include "hphp/runtime/ext/ext_datetime.h"
+#include "hphp/runtime/ext/ext_hotprofiler.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -56,9 +56,31 @@ public:
     smart_free(m_frameBuffer);
   }
 
-  // Set the time to use a base when computing time elapsed
-  void setBaseTime(int64_t baseTime) {
-    m_baseTime = baseTime;
+  // Returns true if profiling is required by the extension settings or the
+  // environment
+  static inline bool isProfilingNeeded() {
+    return
+      XDEBUG_GLOBAL(ProfilerEnable) ||
+      (XDEBUG_GLOBAL(ProfilerEnableTrigger) &&
+       XDebugUtils::isTriggerSet("XDEBUG_TRACE"));
+  }
+
+  // Returns true if tracing is required by the extension settings or the
+  // environment
+  static inline bool isTracingNeeded() {
+    return
+      XDEBUG_GLOBAL(AutoTrace) ||
+      (XDEBUG_GLOBAL(TraceEnableTrigger) &&
+       XDebugUtils::isTriggerSet("XDEBUG_TRACE"));
+  }
+
+  // Returns true if a profiler should be attached to the current thread
+  static inline bool isNeeded() {
+    return
+      XDEBUG_GLOBAL(CollectTime) ||
+      XDEBUG_GLOBAL(CollectMemory) ||
+      isProfilingNeeded() ||
+      isTracingNeeded();
   }
 
   // Whether or not the profiler is collecting data
@@ -116,16 +138,7 @@ private:
   // Helper used to convert a microseconds since epoch into the format xdebug
   // uses: microseconds since request init, as a double
   inline double timeSinceBase(int64_t time) {
-    return (time - m_baseTime) * 1.0e-6;
-  }
-
-  // Helper that writes a timestamp in the given file in the format used by
-  // xdebug
-  inline void fprintTimestamp(FILE* f) {
-    DateTime now(time(nullptr));
-    fprintf(f, "[%d-%02d-%02d %02d:%02d:%02d]",
-            now.year(), now.month(), now.day(),
-            now.hour(), now.minute(), now.second());
+    return (time - XDEBUG_GLOBAL(InitTime)) * 1.0e-6;
   }
 
   // The different types of tracefile output
@@ -156,6 +169,15 @@ private:
                             const FrameData* parentBegin);
 
   template <TraceOutputType outputType>
+  void writeTracingLinePrefix();
+
+  template <TraceOutputType outputType>
+  void writeTracingLevel(int64_t level);
+
+  template <TraceOutputType outputType>
+  void writeTracingFrameId(uint64_t id);
+
+  template <TraceOutputType outputType>
   void writeTracingTime(int64_t time);
 
   template<TraceOutputType outputType>
@@ -164,11 +186,19 @@ private:
   template <TraceOutputType outputType>
   void writeTracingIndent(int64_t level);
 
+  void writeTracingFuncName(const Func* func, bool isTopPseudoMain);
+
   template<TraceOutputType outputType>
-  void writeTracingFuncName(FrameData& frame, bool isTopPseudoMain);
+  void writeTracingFunc(FrameData& frame, bool isTopPseudoMain);
 
   template <TraceOutputType outputType>
   void writeTracingCallsite(FrameData& frame, const FrameData* parent);
+
+  template <TraceOutputType outputType>
+  void writeTracingLineSuffix();
+
+  template <TraceOutputType outputType>
+  void writeTracingEndFrame(FrameData& frame, int64_t level, int64_t id);
 
   // Used when we have both the beginning and end frame data
   struct Frame {
@@ -202,7 +232,6 @@ private:
   FrameData* m_frameBuffer = nullptr;
   int64_t m_frameBufferSize = 0;
   int64_t m_nextFrameIdx = 0;
-  int64_t m_baseTime = 0;
 
   bool m_collectMemory = false;
   bool m_collectTime = false;
@@ -218,6 +247,10 @@ private:
   std::vector<FrameData> m_tracingStartFrameData;
   String m_tracingFilename;
   FILE* m_tracingFile;
+
+  // When writing the tracing file in computerized and html output we need to
+  // assign each begin/end frame pair an id.
+  uint64_t m_tracingNextFrameId = 0;
 
   // When writing the tracing file with show_mem_delta we need a reference to
   // the previous begin frame

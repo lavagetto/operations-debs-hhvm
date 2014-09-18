@@ -41,7 +41,7 @@
 // Include last to localize effects to this file
 #include "hphp/util/assert-throw.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(hhir);
 
@@ -50,19 +50,15 @@ TRACE_SET_MOD(hhir);
 namespace {
 
 bool classIsUnique(const Class* cls) {
-  return RuntimeOption::RepoAuthoritative &&
-    cls &&
-    (cls->attrs() & AttrUnique);
+  return RuntimeOption::RepoAuthoritative && cls && (cls->attrs() & AttrUnique);
 }
 
 bool classIsUniqueNormalClass(const Class* cls) {
-  return classIsUnique(cls) &&
-    !(cls->attrs() & (AttrInterface | AttrTrait));
+  return classIsUnique(cls) && isNormalClass(cls);
 }
 
 bool classIsUniqueInterface(const Class* cls) {
-  return classIsUnique(cls) &&
-    (cls->attrs() & AttrInterface);
+  return classIsUnique(cls) && isInterface(cls);
 }
 
 }
@@ -625,6 +621,21 @@ void HhbcTranslator::emitNewMixedArray(int capacity) {
   } else {
     push(gen(NewMixedArray, cns(capacity)));
   }
+}
+
+void HhbcTranslator::emitNewVArray(int capacity) {
+  // TODO(t4757263) staticEmptyArray() for VArray
+  push(gen(NewVArray, cns(capacity)));
+}
+
+void HhbcTranslator::emitNewMIArray(int capacity) {
+  // TODO(t4757263) staticEmptyArray() for IntMap
+  push(gen(NewMIArray, cns(capacity)));
+}
+
+void HhbcTranslator::emitNewMSArray(int capacity) {
+  // TODO(t4757263) staticEmptyArray() for StrMap
+  push(gen(NewMSArray, cns(capacity)));
 }
 
 void HhbcTranslator::emitNewLikeArrayL(int id, int capacity) {
@@ -1649,7 +1660,7 @@ void HhbcTranslator::emitDecodeCufIter(uint32_t iterId, int offset,
     emitJmpCondHelper(offset, true, jmpFlags, res);
   } else {
     gen(DecRef, src);
-    emitJmpImpl(offset, JmpFlagBreakTracelet, nullptr);
+    emitJmpImpl(offset, JmpFlagEndsRegion, nullptr);
   }
 }
 
@@ -1659,7 +1670,7 @@ void HhbcTranslator::emitCIterFree(uint32_t iterId) {
 
 void HhbcTranslator::emitIterBreak(const ImmVector& iv,
                                    uint32_t offset,
-                                   bool breakTracelet) {
+                                   bool endsRegion) {
   int iterIndex;
   for (iterIndex = 0; iterIndex < iv.size(); iterIndex += 2) {
     IterKind iterKind = (IterKind)iv.vec32()[iterIndex];
@@ -1671,7 +1682,7 @@ void HhbcTranslator::emitIterBreak(const ImmVector& iv,
     }
   }
 
-  if (!breakTracelet) return;
+  if (!endsRegion) return;
   gen(Jmp, makeExit(offset));
 }
 
@@ -2163,15 +2174,12 @@ void HhbcTranslator::emitJmpImpl(int32_t offset,
     if (flags & JmpFlagNextIsMerge) {
       exceptionBarrier();
     }
-    auto target =
-      (!m_irb->blockExists(offset) || m_irb->blockIsIncompatible(offset))
-      ? makeExit(offset)
-      : makeBlock(offset);
+    auto target = getBlock(offset);
     assert(target != nullptr);
     gen(Jmp, target);
     return;
   }
-  if (!(flags & JmpFlagBreakTracelet)) return;
+  if (!(flags & JmpFlagEndsRegion)) return;
   gen(Jmp, makeExit(offset));
 }
 
@@ -2184,7 +2192,7 @@ void HhbcTranslator::emitJmpCondHelper(int32_t taken,
                                        bool negate,
                                        JmpFlags flags,
                                        SSATmp* src) {
-  if (flags & JmpFlagBreakTracelet) {
+  if (flags & JmpFlagEndsRegion) {
     spillStack();
   }
   if (genMode() == IRGenMode::CFG && (flags & JmpFlagNextIsMerge)) {
@@ -2194,10 +2202,7 @@ void HhbcTranslator::emitJmpCondHelper(int32_t taken,
     // start with a DefSP to block SP-chain walking).
     exceptionBarrier();
   }
-  auto const target  = (!(flags & JmpFlagBothPaths)
-                        || m_irb->blockIsIncompatible(taken))
-    ? makeExit(taken)
-    : makeBlock(taken);
+  auto const target = getBlock(taken);
   assert(target != nullptr);
   auto const boolSrc = gen(ConvCellToBool, src);
   gen(DecRef, src);
@@ -2632,8 +2637,7 @@ void HhbcTranslator::emitFPushCtor(int32_t numParams) {
 }
 
 static bool canInstantiateClass(const Class* cls) {
-  return cls &&
-    !(cls->attrs() & (AttrAbstract | AttrInterface | AttrTrait));
+  return cls && isNormalClass(cls) && !isAbstract(cls);
 }
 
 void HhbcTranslator::emitInitProps(const Class* cls, Block* catchBlock) {
@@ -2663,10 +2667,17 @@ void HhbcTranslator::emitInitSProps(const Class* cls, Block* catchBlock) {
 }
 
 SSATmp* HhbcTranslator::emitAllocObjFast(const Class* cls) {
+  auto registerObj = [this, cls](SSATmp* obj) {
+    if (RuntimeOption::EnableObjDestructCall && cls->getDtor()) {
+      gen(RegisterLiveObj, obj);
+    }
+    return obj;
+  };
+
   // If it's an extension class with a custom instance initializer,
   // that init function does all the work.
   if (cls->instanceCtor()) {
-    return gen(ConstructInstance, makeCatch(), ClassData(cls));
+    return registerObj(gen(ConstructInstance, makeCatch(), ClassData(cls)));
   }
 
   // First, make sure our property init vectors are all set up
@@ -2686,10 +2697,10 @@ SSATmp* HhbcTranslator::emitAllocObjFast(const Class* cls) {
 
   // Call a custom initializer if one exists
   if (cls->callsCustomInstanceInit()) {
-    return gen(CustomInstanceInit, ssaObj);
+    return registerObj(gen(CustomInstanceInit, ssaObj));
   }
 
-  return ssaObj;
+  return registerObj(ssaObj);
 }
 
 void HhbcTranslator::emitFPushCtorD(int32_t numParams, int32_t classNameStrId) {
@@ -2700,7 +2711,6 @@ void HhbcTranslator::emitFPushCtorD(int32_t numParams, int32_t classNameStrId) {
   bool persistentCls = classHasPersistentRDS(cls);
   bool canInstantiate = canInstantiateClass(cls);
   bool fastAlloc =
-    !RuntimeOption::EnableObjDestructCall &&
     persistentCls &&
     canInstantiate &&
     !cls->callsCustomInstanceInit();
@@ -2749,13 +2759,7 @@ void HhbcTranslator::emitCreateCl(int32_t numParams, int32_t funNameStrId) {
   auto const clonedFunc = invokeFunc->cloneAndSetClass(curClass());
   assert(cls && (cls->attrs() & AttrUnique));
 
-  // Although closures can't have destructors, destructing the
-  // captured values (or captured $this) can lead to user-visible
-  // side-effects, so we can't use AllocObjFast if
-  // EnableObjDestructCall is on.
-  auto const closure =
-    RuntimeOption::EnableObjDestructCall ? gen(AllocObj, makeCatch(), cns(cls))
-                                         : emitAllocObjFast(cls);
+  auto const closure = emitAllocObjFast(cls);
   gen(IncRef, closure);
 
   auto const ctx = [&]{
@@ -3346,9 +3350,15 @@ SSATmp* HhbcTranslator::optimizedCallIniGet() {
     return nullptr;
   }
 
-  std::string value;
+  Variant value;
   IniSetting::Get(settingName, value);
-  return cns(makeStaticString(value));
+  // ini_get() is now enhanced to return more than strings
+  // Only return a string, get out of here if we are something
+  // else like an array
+  if (value.isString()) {
+    return cns(makeStaticString(value.toString()));
+  }
+  return nullptr;
 }
 
 SSATmp* HhbcTranslator::optimizedCallGetClass(uint32_t numNonDefault) {
@@ -3358,19 +3368,13 @@ SSATmp* HhbcTranslator::optimizedCallGetClass(uint32_t numNonDefault) {
   };
 
   if (numNonDefault == 0) return curName();
-
   assert(numNonDefault == 1);
 
   auto const val = topC(0);
-
   if (val->isA(Type::Null)) return curName();
 
-  // get_class($this) is just get_called_class().
-  if (val->inst()->is(LdThis)) return optimizedCallGetCalledClass();
+  if (val->isA(Type::Obj)) return gen(LdClsName, gen(LdObjClass, val));
 
-  auto const ty = val->type();
-  if (!(ty < Type::Obj)) return nullptr;
-  if (auto const exact = ty.getExactClass()) return cns(exact->name());
   return nullptr;
 }
 
@@ -3536,9 +3540,9 @@ void HhbcTranslator::emitBuiltinCall(const Func* callee,
   // Collect the parameter locals---we'll need them later.  Also
   // determine which ones will need to be passed through the eval
   // stack.
-  smart::vector<SSATmp*> paramSSAs(numArgs);
-  smart::vector<bool> paramThroughStack(numArgs);
-  smart::vector<bool> paramNeedsConversion(numArgs);
+  jit::vector<SSATmp*> paramSSAs(numArgs);
+  jit::vector<bool> paramThroughStack(numArgs);
+  jit::vector<bool> paramNeedsConversion(numArgs);
   auto numParamsThroughStack = uint32_t{0};
   for (auto i = uint32_t{0}; i < numArgs; ++i) {
     // Fill in paramSSAs in reverse, since they may come from popC's.
@@ -3815,8 +3819,7 @@ void HhbcTranslator::emitRetFromInlined(Type type) {
   auto const retVal = pop(type, DataTypeGeneric);
   // Before we leave the inlined frame, grab a type prediction from
   // our DefInlineFP.
-  auto const retPred = frameRoot(
-    m_irb->fp()->inst())->extra<DefInlineFP>()->retTypePred;
+  auto const retPred = m_irb->fp()->inst()->extra<DefInlineFP>()->retTypePred;
   emitEndInlinedCommon();
   push(retVal);
   if (retPred < retVal->type()) { // TODO: this if statement shouldn't
@@ -5616,7 +5619,7 @@ uint32_t localInputId(const NormalizedInstruction& inst) {
 folly::Optional<Type> HhbcTranslator::interpOutputType(
     const NormalizedInstruction& inst,
     folly::Optional<Type>& checkTypeType) const {
-  using namespace JIT::InstrFlags;
+  using namespace jit::InstrFlags;
   auto localType = [&]{
     auto locId = localInputId(inst);
     assert(locId >= 0 && locId < curFunc()->numLocals());
@@ -5714,14 +5717,14 @@ folly::Optional<Type> HhbcTranslator::interpOutputType(
   not_reached();
 }
 
-smart::vector<InterpOneData::LocalType>
+jit::vector<InterpOneData::LocalType>
 HhbcTranslator::interpOutputLocals(const NormalizedInstruction& inst,
                                    bool& smashesAllLocals,
                                    folly::Optional<Type> pushedType) {
-  using namespace JIT::InstrFlags;
+  using namespace jit::InstrFlags;
   if (!(getInstrInfo(inst.op()).out & Local)) return {};
 
-  smart::vector<InterpOneData::LocalType> locals;
+  jit::vector<InterpOneData::LocalType> locals;
   auto setLocType = [&](uint32_t id, Type t) {
     // Relax the type for pseudomains so that we can actually guard on it.
     auto const type = inPseudoMain() ? t.relaxToGuardable() : t;
@@ -5912,7 +5915,7 @@ void HhbcTranslator::emitInterpOne(folly::Optional<Type> outType, int popped,
   auto op = unit->getOpcode(bcOff());
 
   auto& iInfo = getInstrInfo(op);
-  if (iInfo.type == JIT::InstrFlags::OutFDesc) {
+  if (iInfo.type == jit::InstrFlags::OutFDesc) {
     m_fpiStack.emplace(sp, m_irb->spOffset());
   } else if (isFCallStar(op) && !m_fpiStack.empty()) {
     m_fpiStack.pop();
@@ -6238,10 +6241,17 @@ Block* HhbcTranslator::makeCatchNoSpill() {
 }
 
 /*
- * Create a block corresponding to bytecode control flow.
+ * Returns an IR block corresponding to the given offset.
  */
-Block* HhbcTranslator::makeBlock(Offset offset) {
-  return m_irb->makeBlock(offset);
+Block* HhbcTranslator::getBlock(Offset offset) {
+  // If hasBlock returns true, then IRUnit already has a block for
+  // that offset and makeBlock will just return it.  This will be the
+  // proper successor block set by Translator::setSuccIRBlocks.
+  // Otherwise, the given offset doesn't belong to the region, so we
+  // just create an exit block.
+
+  return m_irb->hasBlock(offset) ? m_irb->makeBlock(offset)
+                                 : makeExit(offset);
 }
 
 SSATmp* HhbcTranslator::emitSpillStack(SSATmp* sp,
@@ -6466,15 +6476,7 @@ SSATmp* HhbcTranslator::pushStLoc(uint32_t id,
     incRefNew
   );
 
-  // Approximately mimic hhbc guard relaxation.  When RefcountOpts are
-  // enabled a SetL followed by a PopC will not touch the refcount,
-  // since the IncRef will be cancelled by the DecRef.
-  auto outputPopped = curSrcKey().advanced().op() == OpPopC &&
-    m_irb->localType(id, DataTypeGeneric).notBoxed() &&
-    RuntimeOption::EvalHHIRRefcountOpts;
-
-  auto const cat = outputPopped ? DataTypeGeneric : DataTypeCountness;
-  m_irb->constrainValue(ret, cat);
+  m_irb->constrainValue(ret, DataTypeCountness);
   return push(ret);
 }
 
@@ -6524,7 +6526,7 @@ void HhbcTranslator::end(Offset nextPc) {
 }
 
 void HhbcTranslator::endBlock(Offset next, bool nextIsMerge) {
-  if (m_irb->blockExists(next)) {
+  if (m_irb->hasBlock(next)) {
     emitJmpImpl(next,
                 nextIsMerge ? JmpFlagNextIsMerge : JmpFlagNone,
                 nullptr);

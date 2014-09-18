@@ -69,7 +69,7 @@
 
 TRACE_SET_MOD(trans);
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
 Lease Translator::s_writeLease;
@@ -474,6 +474,9 @@ static const struct {
   { OpArray,       {None,             Stack1,       OutArrayImm,       1 }},
   { OpNewArray,    {None,             Stack1,       OutArray,          1 }},
   { OpNewMixedArray,  {None,          Stack1,       OutArray,          1 }},
+  { OpNewVArray,   {None,             Stack1,       OutArray,          1 }},
+  { OpNewMIArray,  {None,             Stack1,       OutArray,          1 }},
+  { OpNewMSArray,  {None,             Stack1,       OutArray,          1 }},
   { OpNewLikeArrayL,  {None,          Stack1,       OutArray,          1 }},
   { OpNewPackedArray, {StackN,        Stack1,       OutArray,          0 }},
   { OpNewStructArray, {StackN,        Stack1,       OutArray,          0 }},
@@ -915,7 +918,7 @@ int getStackDelta(const NormalizedInstruction& ni) {
 bool outputIsPredicted(NormalizedInstruction& inst) {
   auto const& iInfo = getInstrInfo(inst.op());
   auto doPrediction =
-    (iInfo.type == OutPred || iInfo.type == OutCns) && !inst.breaksTracelet;
+    (iInfo.type == OutPred || iInfo.type == OutCns) && !inst.endsRegion;
   if (doPrediction) {
     // All OutPred ops except for SetM have a single stack output for now.
     assert(iInfo.out == Stack1 || inst.op() == OpSetM);
@@ -1362,14 +1365,19 @@ Translator::isSrcKeyInBL(const SrcKey& sk) {
   if (m_dbgBLSrcKey.find(sk) != m_dbgBLSrcKey.end()) {
     return true;
   }
-  for (PC pc = unit->at(sk.offset());
-      !opcodeBreaksBB(*reinterpret_cast<const Op*>(pc));
-      pc += instrLen((Op*)pc)) {
+
+  // Loop until the end of the basic block inclusively. This is useful for
+  // function exit breakpoints, which are implemented by blacklisting the RetC
+  // opcodes.
+  PC pc = nullptr;
+  do {
+    pc = (pc == nullptr) ?
+      unit->at(sk.offset()) : pc + instrLen((Op*) pc);
     if (m_dbgBLPC.checkPC(pc)) {
       m_dbgBLSrcKey.insert(sk);
       return true;
     }
-  }
+  } while (!opcodeBreaksBB(*reinterpret_cast<const Op*>(pc)));
   return false;
 }
 
@@ -1457,8 +1465,9 @@ void Translator::createBlockMaps(const RegionDesc&        region,
   IRBuilder& irb = ht.irBuilder();
   blockIdToIRBlock.clear();
   blockIdToRegionBlock.clear();
-  for (unsigned i = 0; i < region.blocks.size(); i++) {
-    RegionDesc::Block* rBlock = region.blocks[i].get();
+  auto const& blocks = region.blocks();
+  for (unsigned i = 0; i < blocks.size(); i++) {
+    RegionDesc::Block* rBlock = blocks[i].get();
     auto id = rBlock->id();
     DEBUG_ONLY Offset bcOff = rBlock->start().offset();
     assert(IMPLIES(i == 0, bcOff == irb.unit().bcOff()));
@@ -1509,11 +1518,8 @@ void Translator::setSuccIRBlocks(
   FTRACE(3, "setSuccIRBlocks: srcBlockId = {}\n", srcBlockId);
   IRBuilder& irb = m_irTrans->hhbcTrans().irBuilder();
   irb.resetOffsetMapping();
-  for (auto& arc : region.arcs) {
-    if (arc.src == srcBlockId) {
-      RegionDesc::BlockId dstBlockId = arc.dst;
-      setIRBlock(dstBlockId, blockIdToIRBlock, blockIdToRegionBlock);
-    }
+  for (auto dstBlockId : region.succs(srcBlockId)) {
+    setIRBlock(dstBlockId, blockIdToIRBlock, blockIdToRegionBlock);
   }
 }
 
@@ -1526,44 +1532,25 @@ static void findSuccOffsets(const RegionDesc&              region,
                             const BlockIdToRegionBlockMap& blockIdToRegionBlock,
                             OffsetSet&                     set) {
   set.clear();
-  for (auto& arc : region.arcs) {
-    if (arc.src == srcBlockId) {
-      RegionDesc::BlockId dstBlockId = arc.dst;
-      auto rit = blockIdToRegionBlock.find(dstBlockId);
-      assert(rit != blockIdToRegionBlock.end());
-      RegionDesc::Block* rDstBlock = rit->second;
-      Offset bcOffset = rDstBlock->start().offset();
-      set.insert(bcOffset);
-    }
+  for (auto dstBlockId : region.succs(srcBlockId)) {
+    auto rit = blockIdToRegionBlock.find(dstBlockId);
+    assert(rit != blockIdToRegionBlock.end());
+    RegionDesc::Block* rDstBlock = rit->second;
+    Offset bcOffset = rDstBlock->start().offset();
+    set.insert(bcOffset);
   }
-}
-
-/*
- * Returns whether or not succOffsets contains both successors of inst.
- */
-static bool containsBothSuccs(const OffsetSet&             succOffsets,
-                              const NormalizedInstruction& inst) {
-  if (inst.breaksTracelet) return false;
-  Offset takenOffset      = inst.offset() + inst.imm[0].u_BA;
-  Offset fallthruOffset   = inst.offset() + instrLen((Op*)(inst.pc()));
-  bool   takenIncluded    = succOffsets.count(takenOffset);
-  bool   fallthruIncluded = succOffsets.count(fallthruOffset);
-  return takenIncluded && fallthruIncluded;
 }
 
 /*
  * Returns whether offset is a control-flow merge within region.
  */
 static bool isMergePoint(Offset offset, const RegionDesc& region) {
-  for (auto block : region.blocks) {
+  for (auto const block : region.blocks()) {
     auto const bid = block->id();
     if (block->start().offset() == offset) {
-      auto inCount = int{0};
-      for (auto arc : region.arcs) {
-        if (arc.dst == bid) inCount++;
-      }
+      auto inCount = region.preds(bid).size();
       // NB: The initial block has an invisible "entry arc".
-      if (block == region.blocks[0]) ++inCount;
+      if (block == region.entry()) ++inCount;
       if (inCount >= 2) return true;
     }
   }
@@ -1575,8 +1562,8 @@ static bool blockHasUnprocessedPred(
   RegionDesc::BlockId           blockId,
   const RegionDesc::BlockIdSet& processedBlocks)
 {
-  for (auto& arc : region.arcs) {
-    if (arc.dst == blockId && processedBlocks.count(arc.src) == 0) {
+  for (auto predId : region.preds(blockId)) {
+    if (processedBlocks.count(predId) == 0) {
       return true;
     }
   }
@@ -1584,29 +1571,25 @@ static bool blockHasUnprocessedPred(
 }
 
 /*
- * Returns whether the next instruction following inst (whether by
- * fallthrough or branch target) is a merge in region.
+ * Returns whether any instruction following inst (whether by fallthrough or
+ * branch target) is a merge in region.
  */
 static bool nextIsMerge(const NormalizedInstruction& inst,
                         const RegionDesc& region) {
-  Offset fallthruOffset   = inst.offset() + instrLen((Op*)(inst.pc()));
-  if (instrIsNonCallControlFlow(inst.op())) {
-    Offset takenOffset      = inst.offset() + inst.imm[0].u_BA;
-    return isMergePoint(takenOffset, region)
-        || isMergePoint(fallthruOffset, region);
+  Offset fallthruOffset = inst.offset() + instrLen((Op*)(inst.pc()));
+  if (instrHasConditionalBranch(inst.op())) {
+    auto offsetPtr = instrJumpOffset((Op*)inst.pc());
+    Offset takenOffset = inst.offset() + *offsetPtr;
+    return fallthruOffset == takenOffset
+      || isMergePoint(takenOffset, region)
+      || isMergePoint(fallthruOffset, region);
+  }
+  if (isUnconditionalJmp(inst.op())) {
+    auto offsetPtr = instrJumpOffset((Op*)inst.pc());
+    Offset takenOffset = inst.offset() + *offsetPtr;
+    return isMergePoint(takenOffset, region);
   }
   return isMergePoint(fallthruOffset, region);
-}
-
-/*
- * True if there are no outgoing arcs from the block.
- */
-static bool blockEndsRegion(RegionDesc::BlockId blockId,
-                            const RegionDesc& region) {
-  for (auto const& arc : region.arcs) {
-    if (arc.src == blockId) return false;
-  }
-  return true;
 }
 
 Translator::TranslateResult
@@ -1614,14 +1597,19 @@ Translator::translateRegion(const RegionDesc& region,
                             bool bcControlFlow,
                             RegionBlacklist& toInterp,
                             TransFlags trflags) {
-  assert(!region.blocks.empty());
-
   const Timer translateRegionTimer(Timer::translateRegion);
   FTRACE(1, "translateRegion starting with:\n{}\n", show(region));
 
+  m_region = &region;
+  SCOPE_EXIT { m_region = nullptr; };
+
+  std::string errorMsg;
+  always_assert_log(check(region, errorMsg),
+                    [&] { return errorMsg + "\n" + show(region); });
+
   HhbcTranslator& ht = m_irTrans->hhbcTrans();
   IRBuilder& irb = ht.irBuilder();
-  auto const startSk = region.blocks.front()->start();
+  auto const startSk = region.start();
 
   BlockIdToIRBlockMap     blockIdToIRBlock;
   BlockIdToRegionBlockMap blockIdToRegionBlock;
@@ -1634,8 +1622,9 @@ Translator::translateRegion(const RegionDesc& region,
   RegionDesc::BlockIdSet processedBlocks;
 
   Timer irGenTimer(Timer::translateRegion_irGeneration);
-  for (auto b = 0; b < region.blocks.size(); b++) {
-    auto const& block  = region.blocks[b];
+  auto& blocks = region.blocks();
+  for (auto b = 0; b < blocks.size(); b++) {
+    auto const& block  = blocks[b];
     auto const blockId = block->id();
     auto sk            = block->start();
     auto typePreds     = makeMapWalker(block->typePreds());
@@ -1655,13 +1644,12 @@ Translator::translateRegion(const RegionDesc& region,
         always_assert(RuntimeOption::EvalJitLoops ||
                       RuntimeOption::EvalJitPGORegionSelector == "wholecfg");
         irb.clearBlockState(irBlock);
-        irb.state().clearCurrentLocals();
       }
-      ht.irBuilder().startBlock(irBlock);
+      BCMarker marker(sk, block->initialSpOffset(), profTransId);
+      ht.irBuilder().startBlock(irBlock, marker);
       findSuccOffsets(region, blockId, blockIdToRegionBlock, succOffsets);
       setSuccIRBlocks(region, blockId, blockIdToIRBlock, blockIdToRegionBlock);
     }
-    ht.irBuilder().recordOffset(sk.offset());
 
     for (unsigned i = 0; i < block->length(); ++i, sk.advance(block->unit())) {
       // Update bcOff here so any guards or assertions from metadata are
@@ -1671,7 +1659,7 @@ Translator::translateRegion(const RegionDesc& region,
       // Emit prediction guards. If this is the first instruction in the region
       // the guards will go to a retranslate request. Otherwise, they'll go to
       // a side exit.
-      bool isFirstRegionInstr = (block == region.blocks.front() && i == 0);
+      bool isFirstRegionInstr = (block == region.entry() && i == 0);
       if (isFirstRegionInstr) ht.emitRB(Trace::RBTypeTraceletGuards, sk);
 
       // Emit type guards.
@@ -1723,15 +1711,15 @@ Translator::translateRegion(const RegionDesc& region,
 
       // Create and initialize the instruction.
       NormalizedInstruction inst(sk, block->unit());
-      inst.breaksTracelet = (i == block->length() - 1 &&
-                             block == region.blocks.back());
       inst.funcd = topFunc;
-      if (instrIsNonCallControlFlow(inst.op()) && !inst.breaksTracelet) {
-        assert(b < region.blocks.size());
-        inst.nextOffset = region.blocks[b+1]->start().offset();
+      if (i == block->length() - 1) {
+        inst.endsRegion = region.isExit(blockId);
+        inst.nextIsMerge = nextIsMerge(inst, region);
+        if (instrIsNonCallControlFlow(inst.op()) &&
+            b < blocks.size() - 1) {
+          inst.nextOffset = blocks[b+1]->start().offset();
+        }
       }
-      inst.nextIsMerge = nextIsMerge(inst, region);
-      inst.includeBothPaths = containsBothSuccs(succOffsets, inst);
 
       // We can get a more precise output type for interpOne if we know all of
       // its inputs, so we still populate the rest of the instruction even if
@@ -1795,6 +1783,8 @@ Translator::translateRegion(const RegionDesc& region,
         auto returnFuncOff = returnSk.offset() - block->func()->base();
         ht.beginInlining(inst.imm[0].u_IVA, callee, returnFuncOff,
                          doPrediction ? inst.outPred : Type::Gen);
+        // "Fallthrough" into the callee's first block
+        ht.endBlock(blocks[b + 1]->start().offset(), inst.nextIsMerge);
         continue;
       }
 
@@ -1871,7 +1861,7 @@ Translator::translateRegion(const RegionDesc& region,
 
       // Insert a fallthrough jump
       if (ht.genMode() == IRGenMode::CFG &&
-          i == block->length() - 1 && block != region.blocks.back()) {
+          i == block->length() - 1 && block != blocks.back()) {
         if (instrAllowsFallThru(inst.op())) {
           auto nextOffset = inst.nextOffset != kInvalidOffset
             ? inst.nextOffset
@@ -1879,13 +1869,15 @@ Translator::translateRegion(const RegionDesc& region,
           // prepareForSideExit is done later in Trace mode, but it
           // needs to happen here or else we generate the SpillStack
           // after the fallthrough jump, which is just weird.
-          if (b < region.blocks.size() - 1
-              && region.isSideExitingBlock(blockId)) {
+          if (b < blocks.size() - 1 && region.isSideExitingBlock(blockId)) {
             ht.prepareForSideExit();
           }
           ht.endBlock(nextOffset, inst.nextIsMerge);
+        } else if (isRet(inst.op()) || inst.op() == OpNativeImpl) {
+          // "Fallthrough" from inlined return to the next block
+          ht.endBlock(blocks[b + 1]->start().offset(), inst.nextIsMerge);
         }
-        if (blockEndsRegion(blockId, region)) {
+        if (region.isExit(blockId)) {
           ht.end();
         }
       }
@@ -1899,7 +1891,7 @@ Translator::translateRegion(const RegionDesc& region,
     }
 
     if (ht.genMode() == IRGenMode::Trace) {
-      if (b < region.blocks.size() - 1 && region.isSideExitingBlock(blockId)) {
+      if (b < blocks.size() - 1 && region.isSideExitingBlock(blockId)) {
         ht.prepareForSideExit();
       }
     }

@@ -17,11 +17,11 @@
 #ifndef incl_HPHP_HHVM_HHIR_SIMPLIFIER_H_
 #define incl_HPHP_HHVM_HHIR_SIMPLIFIER_H_
 
-#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/cse.h"
 #include "hphp/runtime/vm/jit/ir.h"
 
-namespace HPHP {  namespace JIT {
+namespace HPHP { namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -57,7 +57,7 @@ struct Simplifier {
    * dst (if any).
    */
   struct Result {
-    smart::vector<IRInstruction*> instrs;
+    jit::vector<IRInstruction*> instrs;
     SSATmp* dst;
   };
   Result simplify(const IRInstruction*, bool typesMightRelax);
@@ -203,8 +203,8 @@ private:
   // The current instruction being simplified is always at
   // m_insts.top(). This has to be a stack instead of just a pointer
   // because simplify is reentrant.
-  smart::stack<const IRInstruction*> m_insts;
-  smart::vector<IRInstruction*> m_newInsts;
+  jit::stack<const IRInstruction*> m_insts;
+  jit::vector<IRInstruction*> m_newInsts;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -271,7 +271,7 @@ StackValueInfo getStackValue(SSATmp* stack, uint32_t index);
  * This function is used for computing available value for
  * DecRef->DecRefNZ conversions in IRBuilder.
  */
-smart::vector<SSATmp*> collectStackValues(SSATmp* sp, uint32_t stackDepth);
+jit::vector<SSATmp*> collectStackValues(SSATmp* sp, uint32_t stackDepth);
 
 /*
  * Propagate very simple copies on the given instruction.
@@ -294,14 +294,6 @@ SSATmp* canonical(SSATmp* tmp);
  * frame. Returns nullptr if the frame can't be found.
  */
 IRInstruction* findSpillFrame(SSATmp* sp);
-
-/*
- * Given an instruction defining a frame pointer, chase backwards in the
- * definition chain looking for the first DefFP or DefInlineFP. Never returns
- * nullptr.
- */
-const IRInstruction* frameRoot(const IRInstruction* inst);
-IRInstruction* frameRoot(IRInstruction* inst);
 
 //////////////////////////////////////////////////////////////////////
 

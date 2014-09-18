@@ -94,8 +94,7 @@
 
 #include "hphp/runtime/vm/jit/mc-generator-internal.h"
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(mcg);
 
@@ -147,7 +146,7 @@ CppCall MCGenerator::getDtorCall(DataType type) {
     return CppCall::method(&RefData::release);
   default:
     assert(false);
-    NOT_REACHED();
+    not_reached();
   }
 }
 
@@ -211,6 +210,8 @@ TCA MCGenerator::retranslateOpt(TransID transId, bool align) {
 
   SCOPE_EXIT { m_tx.setMode(TransKind::Invalid); };
 
+  if (!m_tx.profData()->hasTransRec(transId)) return nullptr;
+
   always_assert(m_tx.profData()->transRegion(transId) != nullptr);
 
   Func*       func = m_tx.profData()->transFunc(transId);
@@ -236,8 +237,8 @@ TCA MCGenerator::retranslateOpt(TransID transId, bool align) {
 
   for (auto region : regions) {
     m_tx.setMode(TransKind::Optimize);
-    always_assert(region->blocks.size() > 0);
-    SrcKey regionSk = region->blocks[0]->start();
+    always_assert(!region->empty());
+    SrcKey regionSk = region->start();
     auto translArgs = TranslArgs(regionSk, align).region(region);
     if (setFuncBody && regionSk.offset() == func->base()) {
       translArgs.setFuncBody();
@@ -256,6 +257,9 @@ TCA MCGenerator::retranslateOpt(TransID transId, bool align) {
       func->setPrologue(entryNumParams, regionStart);
     }
   }
+
+  m_tx.profData()->freeFuncData(funcId);
+
   assert(start);
   return start;
 }
@@ -467,7 +471,7 @@ MCGenerator::getCallArrayPrologue(Func* func) {
     if (!writer) return nullptr;
     tca = func->getFuncBody();
     if (tca != m_tx.uniqueStubs.funcBodyHelperThunk) return tca;
-    tca = mcg->backEnd().emitCallArrayPrologue(func, dvs);
+    tca = backEnd().emitCallArrayPrologue(func, dvs);
     func->setFuncBody(tca);
   } else {
     SrcKey sk(func, func->base(), false);
@@ -484,7 +488,7 @@ MCGenerator::smashPrologueGuards(TCA* prologues, int numPrologues,
   for (int i = 0; i < numPrologues; i++) {
     if (prologues[i] != m_tx.uniqueStubs.fcallHelperThunk
         && backEnd().funcPrologueHasGuard(prologues[i], func)) {
-      mcg->backEnd().funcPrologueSmashGuard(prologues[i], func);
+      backEnd().funcPrologueSmashGuard(prologues[i], func);
     }
   }
 }
@@ -854,7 +858,7 @@ MCGenerator::bindJmpccFirst(TCA toSmash,
   assert(&cb != &code.frozen());
 
   // XXX Use of kJmp*Len here is a layering violation.
-  using namespace X64;
+  using namespace x64;
 
   // can we just directly fall through?
   // a jmp + jz takes 5 + 6 = 11 bytes
@@ -1016,7 +1020,7 @@ MCGenerator::enterTC(TCA start, void* data) {
       Trace::ringbufferEntry(RBTypeEnterTC, skData, (uint64_t)start);
     }
 
-    mcg->backEnd().enterTCHelper(start, info);
+    backEnd().enterTCHelper(start, info);
     assert(isValidVMStackAddress(vmRegsUnsafe().stack.top()));
 
     tl_regState = VMRegState::CLEAN; // Careful: pc isn't sync'ed yet.
@@ -1260,7 +1264,7 @@ bool MCGenerator::handleServiceRequest(TReqInfo& info,
       vmpc() = liveUnit()->at(fe->m_fcallOff);
       assert(isFCallStar(*reinterpret_cast<const Op*>(vmpc())));
       raise_error("Stack overflow");
-      NOT_REACHED();
+      not_reached();
     } else {
       /*
        * We were called via re-entry
@@ -1472,6 +1476,15 @@ MCGenerator::recordSyncPoint(CodeAddress frontier, Offset pcOff, Offset spOff) {
     PendingFixup(frontier, Fixup(pcOff, spOff)));
 }
 
+/*
+ * Equivalent to container.clear(), but guarantees to free
+ * any memory associated with the container (eg clear
+ * doesn't affect std::vector's capacity).
+ */
+template <typename T> void ClearContainer(T& container) {
+  T().swap(container);
+}
+
 void
 CodeGenFixups::process(GrowableVector<IncomingBranch>* inProgressTailBranches) {
   for (uint i = 0; i < m_pendingFixups.size(); i++) {
@@ -1479,20 +1492,25 @@ CodeGenFixups::process(GrowableVector<IncomingBranch>* inProgressTailBranches) {
     assert(mcg->isValidCodeAddress(tca));
     mcg->fixupMap().recordFixup(tca, m_pendingFixups[i].m_fixup);
   }
-  m_pendingFixups.clear();
+  ClearContainer(m_pendingFixups);
 
   for (auto const& pair : m_pendingCatchTraces) {
     mcg->catchTraceMap().insert(pair.first, pair.second);
   }
-  m_pendingCatchTraces.clear();
+  ClearContainer(m_pendingCatchTraces);
 
   for (auto const& elm : m_pendingJmpTransIDs) {
     mcg->getJmpToTransIDMap().insert(elm);
   }
-  m_pendingJmpTransIDs.clear();
+  ClearContainer(m_pendingJmpTransIDs);
 
   mcg->literals().insert(m_literals.begin(), m_literals.end());
-  m_literals.clear();
+  ClearContainer(m_literals);
+
+  if (inProgressTailBranches) {
+    m_inProgressTailJumps.swap(*inProgressTailBranches);
+  }
+  assert(m_inProgressTailJumps.empty());
 
   /*
    * Currently these are only used by the relocator,
@@ -1501,30 +1519,26 @@ CodeGenFixups::process(GrowableVector<IncomingBranch>* inProgressTailBranches) {
    * Once we try to relocate live code, we'll need to
    * store compact forms of these for later.
    */
-  m_reusedStubs.clear();
-  m_addressImmediates.clear();
-  m_codePointers.clear();
-  m_bcMap.clear();
-  m_alignFixups.clear();
+  ClearContainer(m_reusedStubs);
+  ClearContainer(m_addressImmediates);
+  ClearContainer(m_codePointers);
+  ClearContainer(m_bcMap);
+  ClearContainer(m_alignFixups);
 
-  if (inProgressTailBranches) {
-    m_inProgressTailJumps.swap(*inProgressTailBranches);
-  }
-  assert(m_inProgressTailJumps.empty());
   assert(empty());
 }
 
 void CodeGenFixups::clear() {
-  m_pendingFixups.clear();
-  m_pendingCatchTraces.clear();
-  m_pendingJmpTransIDs.clear();
-  m_reusedStubs.clear();
-  m_addressImmediates.clear();
-  m_codePointers.clear();
-  m_bcMap.clear();
-  m_alignFixups.clear();
-  m_inProgressTailJumps.clear();
-  m_literals.clear();
+  ClearContainer(m_pendingFixups);
+  ClearContainer(m_pendingCatchTraces);
+  ClearContainer(m_pendingJmpTransIDs);
+  ClearContainer(m_reusedStubs);
+  ClearContainer(m_addressImmediates);
+  ClearContainer(m_codePointers);
+  ClearContainer(m_bcMap);
+  ClearContainer(m_alignFixups);
+  ClearContainer(m_inProgressTailJumps);
+  ClearContainer(m_literals);
 }
 
 bool CodeGenFixups::empty() const {
@@ -1583,13 +1597,13 @@ MCGenerator::translateWork(const TranslArgs& args) {
       assert(RuntimeOption::EvalJitPGO);
       region = args.m_region;
       if (region) {
-        assert(region->blocks.size() > 0);
+        assert(!region->empty());
       } else {
         TransID transId = args.m_transId;
         assert(transId != kInvalidTransID);
         region = selectHotRegion(transId, this);
         assert(region);
-        if (region && region->blocks.size() == 0) region = nullptr;
+        if (region && region->empty()) region = nullptr;
       }
     } else {
       assert(m_tx.mode() == TransKind::Profile ||
@@ -1603,7 +1617,7 @@ MCGenerator::translateWork(const TranslArgs& args) {
 
     Translator::TranslateResult result = Translator::Retry;
     Translator::RegionBlacklist regionInterps;
-    Offset const initSpOffset = region ? region->blocks[0]->initialSpOffset()
+    Offset const initSpOffset = region ? region->entry()->initialSpOffset()
                                        : liveSpOff();
     bool bcControlFlow = RuntimeOption::EvalHHIRBytecodeControlFlow;
 
@@ -1702,7 +1716,7 @@ MCGenerator::translateWork(const TranslArgs& args) {
   if (transKindToRecord == TransKind::Interp) {
     assertCleanState();
     FTRACE(1, "emitting dispatchBB interp request for failed translation\n");
-    mcg->backEnd().emitInterpReq(code.main(), code.cold(), sk);
+    backEnd().emitInterpReq(code.main(), code.cold(), sk);
     // Fall through.
   }
 
@@ -1773,6 +1787,11 @@ void MCGenerator::traceCodeGen() {
 
   finishPass(" after initial translation ", kIRLevel);
 
+  always_assert_flog(
+    IMPLIES(cfgHasLoop(unit), RuntimeOption::EvalJitLoops),
+    "IRUnit has loop but Eval.JitLoops=0:\n{}\n", unit
+  );
+
   // Task #4075847: enable optimizations with loops
   if (!(RuntimeOption::EvalJitLoops && m_tx.mode() == TransKind::Optimize)) {
     optimize(unit, ht.irBuilder(), m_tx.mode());
@@ -1816,7 +1835,7 @@ void MCGenerator::initUniqueStubs() {
   // Put the following stubs into ahot, rather than a.
   CodeCache::Selector cbSel(CodeCache::Selector::Args(code).
                             hot(m_tx.useAHot()));
-  m_tx.uniqueStubs = mcg->backEnd().emitUniqueStubs();
+  m_tx.uniqueStubs = backEnd().emitUniqueStubs();
   m_fixups.process(nullptr); // in case we generated literals
 }
 
@@ -1954,14 +1973,14 @@ std::string MCGenerator::getUsage() {
   size_t totalBlockCapacity = 0;
 
   auto addRow = [&](const std::string& name, size_t used, size_t capacity) {
-    totalBlockSize += used;
-    totalBlockCapacity += capacity;
     auto percent = capacity ? 100 * used / capacity : 0;
     usage += folly::format("mcg: {:9} bytes ({}%) in {}\n",
                            used, percent, name).str();
   };
   code.forEachBlock([&](const char* name, const CodeBlock& a) {
     addRow(std::string("code.") + name, a.used(), a.capacity());
+    totalBlockSize += a.used();
+    totalBlockCapacity += a.capacity();
   });
   // Report code.stubs usage = code.cold + code.frozen usage, so
   // ODS doesn't break.
@@ -1969,7 +1988,6 @@ std::string MCGenerator::getUsage() {
   auto const stubsCapacity = code.realCold().capacity() +
     code.realFrozen().capacity();
   addRow(std::string("code.stubs"), stubsUsed, stubsCapacity);
-
   addRow("data", code.data().used(), code.data().capacity());
   addRow("RDS", RDS::usedBytes(),
          RuntimeOption::EvalJitTargetCacheSize * 3 / 4);
@@ -1978,10 +1996,10 @@ std::string MCGenerator::getUsage() {
   addRow("persistentRDS", RDS::usedPersistentBytes(),
          RuntimeOption::EvalJitTargetCacheSize / 4);
   addRow("total",
-         totalBlockSize + code.data().used() +
-         RDS::usedBytes() + RDS::usedPersistentBytes(),
-         totalBlockCapacity + code.data().capacity() +
-         RuntimeOption::EvalJitTargetCacheSize);
+          totalBlockSize + code.data().used()
+          + RDS::usedPersistentBytes(),
+          totalBlockCapacity + code.data().capacity()
+          + (RuntimeOption::EvalJitTargetCacheSize / 4));
 
   return usage;
 }
@@ -2184,38 +2202,42 @@ void MCGenerator::setJmpTransID(TCA jmp) {
   m_fixups.m_pendingJmpTransIDs.emplace_back(jmp, transId);
 }
 
+void RelocationInfo::recordRange(TCA start, TCA end,
+                                 TCA destStart, TCA destEnd) {
+  m_srcRanges.emplace_back(start, end);
+  m_dstRanges.emplace_back(destStart, destEnd);
+  m_adjustedAddresses[start].second = destStart;
+  m_adjustedAddresses[end].first = destEnd;
+}
+
 void RelocationInfo::recordAddress(TCA src, TCA dest, int range) {
-  if (!m_dest) {
-    assert(m_destSize == size_t(-1));
-    m_dest = dest;
-    m_destSize = range;
-  } else {
-    assert(dest - m_dest + range >= m_destSize);
-    m_destSize = dest - m_dest + range;
-  }
-  m_adjustedAddresses.emplace(src, std::make_pair(dest, range));
+  m_adjustedAddresses.emplace(src, std::make_pair(dest, dest + range));
 }
 
 TCA RelocationInfo::adjustedAddressAfter(TCA addr) const {
-  if (size_t(addr - m_start) > size_t(m_end - m_start)) {
-    return nullptr;
-  }
-
   auto it = m_adjustedAddresses.find(addr);
   if (it == m_adjustedAddresses.end()) return nullptr;
 
-  return it->second.first + it->second.second;
+  return it->second.second;
 }
 
 TCA RelocationInfo::adjustedAddressBefore(TCA addr) const {
-  if (size_t(addr - m_start) > size_t(m_end - m_start)) {
-    return nullptr;
-  }
-
   auto it = m_adjustedAddresses.find(addr);
   if (it == m_adjustedAddresses.end()) return nullptr;
 
   return it->second.first;
+}
+
+void RelocationInfo::rewind(TCA start, TCA end) {
+  // start and end could already exist (with start.first
+  // and end.second set respectively), so we shouldn't remove
+  // those nodes. And since they're added by recordRange,
+  // which is called after the failure-prone part of relocation
+  // is done, we can ignore them altogether.
+  auto it = m_adjustedAddresses.upper_bound(start);
+  while (it != m_adjustedAddresses.end() && it->first < end) {
+    m_adjustedAddresses.erase(it++);
+  }
 }
 
 void
@@ -2226,6 +2248,6 @@ emitIncStat(CodeBlock& cb, uint64_t* tl_table, uint index, int n, bool force) {
   mcg->backEnd().emitIncStat(cb, disp, n);
 }
 
-} // HPHP::JIT
+} // HPHP::jit
 
 } // HPHP

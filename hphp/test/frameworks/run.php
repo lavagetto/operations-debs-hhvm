@@ -190,8 +190,8 @@ function run_tests(Vector $frameworks): void {
     $framework->clean();
     if (file_exists($framework->getExpectFile())) {
       $framework->prepareCurrentTestStatuses(
-                                        PHPUnitPatterns::$status_code_pattern,
-                                        PHPUnitPatterns::$stop_parsing_pattern);
+                                        PHPUnitPatterns::STATUS_CODE_PATTERN,
+                                        PHPUnitPatterns::STOP_PARSING_PATTERN);
       human(Colors::YELLOW.$framework->getName().Colors::NONE.": running. ".
             "Comparing against ".count($framework->getCurrentTestStatuses()).
             " tests\n");
@@ -572,6 +572,8 @@ function oss_test_option_map(): OptionInfoMap {
                                         "Currently, php must be installed ".
                                         "and the path to the php binary".
                                         "specified."},
+    'install-only'        => Pair {'',  "Download and install the framework, ".
+                                        "but don't run any tests."},
     'redownload'          => Pair {'',  "Forces a redownload of the framework ".
                                         "code and dependencies. This uses ".
                                         "the current git hash associated with ".
@@ -631,7 +633,10 @@ function main(array $argv): void {
   $framework_class_overrides = get_subclasses_of("Framework")->toSet();
   $frameworks = prepare($available_frameworks, $framework_class_overrides,
                         $passed_frameworks);
-  run_tests($frameworks);
+
+  if (Options::$run_tests) {
+    run_tests($frameworks);
+  }
 }
 
 main($argv);

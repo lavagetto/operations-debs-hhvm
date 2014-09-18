@@ -871,6 +871,10 @@ Variant f_array_splice(VRefParam input, int offset,
   getCheckedArray(input);
   Array ret(Array::Create());
   int64_t len = length.isNull() ? 0x7FFFFFFF : length.toInt64();
+  if (arr_input->isIntMapArray() || arr_input->isStrMapArray()) {
+    MixedArray::downgradeAndWarn(arr_input.get(),
+                                 MixedArray::Reason::kArraySplice);
+  }
   input = ArrayUtil::Splice(arr_input, offset, len, replacement, &ret);
   return ret;
 }
@@ -1078,6 +1082,13 @@ bool f_shuffle(VRefParam array) {
     throw_expected_array_exception();
     return false;
   }
+  if (array.toArray()->isIntMapArray()) {
+    // ArrayUtil::Shuffle will overwrite array, so just raise warning
+    MixedArray::warnUsage(MixedArray::Reason::kShuffle, ArrayData::kIntMapKind);
+  } else if (array.toArray()->isStrMapArray()) {
+    MixedArray::warnUsage(MixedArray::Reason::kShuffle, ArrayData::kStrMapKind);
+  }
+
   array = ArrayUtil::Shuffle(array);
   return true;
 }
@@ -2388,11 +2399,15 @@ Variant f_hphp_array_idx(const Variant& search, const Variant& key, const Varian
   if (!key.isNull()) {
     if (LIKELY(search.isArray())) {
       ArrayData *arr = search.getArrayData();
-      if (UNLIKELY(arr->isIntMapArray())) {
+      if (UNLIKELY(arr->isVPackedArrayOrIntMapArray())) {
         int64_t n;
         if (key.isString() && key.getStringData()->isStrictlyInteger(n)) {
-          MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                                ArrayData::kIntMapKind);
+          if (arr->isVPackedArray()) {
+            PackedArray::warnUsage(PackedArray::Reason::kNumericString);
+          } else {
+            MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                                  ArrayData::kIntMapKind);
+          }
         }
       }
       VarNR index = key.toKey();

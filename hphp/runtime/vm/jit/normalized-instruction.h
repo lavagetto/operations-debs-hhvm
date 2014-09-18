@@ -20,13 +20,13 @@
 #include <memory>
 #include <vector>
 
-#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/srckey.h"
 #include "hphp/runtime/vm/jit/translator.h"
 #include "hphp/runtime/vm/jit/type.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct DynLocation;
@@ -54,8 +54,7 @@ struct NormalizedInstruction {
 
   Offset nextOffset; // for intra-trace* non-call control-flow instructions,
                      // this is the offset of the next instruction in the trace*
-  bool breaksTracelet:1;
-  bool includeBothPaths:1;
+  bool endsRegion:1;
   bool nextIsMerge:1;
   bool changesPC:1;
   bool preppedByRef:1;
@@ -93,12 +92,12 @@ struct NormalizedInstruction {
   template<typename... Args>
   DynLocation* newDynLoc(Args&&... args) {
     m_dynLocs.push_back(
-      smart::make_unique<DynLocation>(std::forward<Args>(args)...));
+      jit::make_unique<DynLocation>(std::forward<Args>(args)...));
     return m_dynLocs.back().get();
   }
 
  private:
-  smart::vector<smart::unique_ptr<DynLocation>> m_dynLocs;
+  jit::vector<jit::unique_ptr<DynLocation>> m_dynLocs;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -116,6 +116,8 @@ public:
    */
   static ArrayData* MakeReserve(uint32_t capacity);
   static ArrayData* MakeReserveSlow(uint32_t capacity);
+  static ArrayData* MakeReserveVArray(uint32_t capacity);
+  static ArrayData* MakeReserveVArraySlow(uint32_t capacity);
 
   /*
    * Allocate a new, empty, request-local array in mixed mode, with
@@ -329,8 +331,6 @@ public:
   static ArrayData* DequeueImpl(ArrayData* adInput, Variant& value);
 
   template <ArrayKind aKind>
-  static void RenumberImpl(ArrayData*);
-  template <ArrayKind aKind>
   static bool AdvanceMArrayIterImpl(ArrayData*, MArrayIter& fp);
 
 private:
@@ -411,7 +411,6 @@ public:
     kForeachByRef,
     kPrepend,
     kPop,
-    kTakeByRef,
     kSetRef,
     kAppendRef,
     kAppend,
@@ -427,7 +426,8 @@ public:
     kSort,
     kUsort,
     kNumericString,
-    kRenumber,
+    kArraySplice,
+    kShuffle,
   };
   static void downgradeAndWarn(ArrayData* ad, const Reason r);
   static void warnUsage(const Reason r, const ArrayKind kind);

@@ -24,20 +24,17 @@
 
 #include "folly/Format.h"
 
-#include "hphp/runtime/base/smart-containers.h"
-#include "hphp/runtime/vm/func.h"
-#include "hphp/runtime/vm/srckey.h"
+#include "hphp/runtime/vm/jit/containers.h"
 #include "hphp/runtime/vm/jit/type.h"
 #include "hphp/runtime/vm/jit/types.h"
+#include "hphp/runtime/vm/func.h"
+#include "hphp/runtime/vm/srckey.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 struct MCGenerator;
 struct ProfData;
 struct TransCFG;
-
-using boost::container::flat_map;
-using boost::container::flat_multimap;
 
 //////////////////////////////////////////////////////////////////////
 
@@ -67,23 +64,50 @@ struct RegionDesc {
   //   - Negative numbers are used for other blocks, which correspond
   //     to blocks created by inlining and which don't correspond to
   //     the beginning of a profiling translation.
-  typedef hphp_hash_set<BlockId> BlockIdSet;
+  typedef boost::container::flat_set<BlockId> BlockIdSet;
+  typedef std::vector<BlockPtr> BlockVec;
 
-  template<typename... Args>
-  Block* addBlock(Args&&... args) {
-    blocks.push_back(
-      std::make_shared<Block>(std::forward<Args>(args)...));
-    return blocks.back().get();
-  }
-  void addArc(BlockId src, BlockId dst);
-  void renumberBlock(BlockId oldId, BlockId newId);
-  void setSideExitingBlock(BlockId bid);
-  bool isSideExitingBlock(BlockId bid) const;
-  std::vector<BlockPtr> blocks;
-  std::vector<Arc>      arcs;
+  bool              empty() const;
+  SrcKey            start() const;
+  BlockPtr          entry() const;
+  const BlockVec&   blocks() const;
+  BlockPtr          block(BlockId id) const;
+  const BlockIdSet& succs(BlockId bid) const;
+  const BlockIdSet& preds(BlockId bid) const;
+  const BlockIdSet& sideExitingBlocks() const;
+  bool              isExit(BlockId bid) const;
+  Block*            addBlock(SrcKey sk, int length, Offset spOffset);
+  void              deleteBlock(BlockId bid);
+  void              renumberBlock(BlockId oldId, BlockId newId);
+  void              addArc(BlockId src, BlockId dst);
+  void              setSideExitingBlock(BlockId bid);
+  bool              isSideExitingBlock(BlockId bid) const;
+  void              append(const RegionDesc&  other);
+  void              prepend(const RegionDesc& other);
+  std::string       toString() const;
+
+  template<class Work>
+  void              forEachArc(Work w) const;
+
+ private:
+  struct BlockData {
+    BlockPtr   block;
+    BlockIdSet preds;
+    BlockIdSet succs;
+    explicit BlockData(BlockPtr b = nullptr) : block(b) {}
+  };
+
+  bool       hasBlock(BlockId id) const;
+  BlockData& data(BlockId id);
+  void       copyBlocksFrom(const RegionDesc& other,
+                            BlockVec::iterator where);
+  void       copyArcsFrom(const RegionDesc& other);
+
+  std::vector<BlockPtr>             m_blocks;
+  hphp_hash_map<BlockId, BlockData> m_data;
   // Set of blocks that that can possibly side exit the region. This
   // is just a hint to the region translator.
-  BlockIdSet            sideExitingBlocks;
+  BlockIdSet                        m_sideExitingBlocks;
 };
 
 typedef std::shared_ptr<RegionDesc>                      RegionDescPtr;
@@ -207,10 +231,10 @@ inline bool operator==(const RegionDesc::ReffinessPred& a,
  * at various execution points, including at entry to the block.
  */
 class RegionDesc::Block {
-  typedef flat_multimap<SrcKey, TypePred> TypePredMap;
-  typedef flat_map<SrcKey, bool> ParamByRefMap;
-  typedef flat_multimap<SrcKey, ReffinessPred> RefPredMap;
-  typedef flat_map<SrcKey, const Func*> KnownFuncMap;
+  typedef boost::container::flat_multimap<SrcKey, TypePred> TypePredMap;
+  typedef boost::container::flat_map<SrcKey, bool> ParamByRefMap;
+  typedef boost::container::flat_multimap<SrcKey, ReffinessPred> RefPredMap;
+  typedef boost::container::flat_map<SrcKey, const Func*> KnownFuncMap;
 
 public:
   explicit Block(const Func* func, bool resumed, Offset start, int length,
@@ -344,8 +368,8 @@ struct RegionContext {
   Offset bcOffset;
   Offset spOffset;
   bool resumed;
-  smart::vector<LiveType> liveTypes;
-  smart::vector<PreLiveAR> preLiveARs;
+  jit::vector<LiveType> liveTypes;
+  jit::vector<PreLiveAR> preLiveARs;
 };
 
 /*
@@ -367,6 +391,18 @@ struct RegionContext::PreLiveAR {
   const Func* func;
   Type        objOrCls;
 };
+
+//////////////////////////////////////////////////////////////////////
+
+template<class Work> inline
+void RegionDesc::forEachArc(Work w) const {
+  for (auto& src : m_blocks) {
+    auto srcId = src->id();
+    for (auto dstId : succs(srcId)) {
+      w(srcId, dstId);
+    }
+  }
+}
 
 //////////////////////////////////////////////////////////////////////
 
@@ -456,6 +492,11 @@ bool    hasTransId(RegionDesc::BlockId blockId);
 TransID getTransId(RegionDesc::BlockId blockId);
 
 /*
+ * Checks if the given region is well-formed.
+ */
+bool check(const RegionDesc& region, std::string& error);
+
+/*
  * Debug stringification for various things.
  */
 std::string show(RegionDesc::Location);
@@ -466,7 +507,6 @@ std::string show(RegionContext::LiveType);
 std::string show(RegionContext::PreLiveAR);
 std::string show(const RegionContext&);
 std::string show(const RegionDesc::Block&);
-std::string show(const RegionDesc::Arc&);
 std::string show(const RegionDesc&);
 
 //////////////////////////////////////////////////////////////////////

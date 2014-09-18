@@ -215,7 +215,7 @@ let check_toplevel env pos =
 (*****************************************************************************)
 
 let rec check_lvalue env = function
-  | _, (Lvar _ | Obj_get _ | Array_get _ | Class_get _) -> ()
+  | _, (Lvar _ | Obj_get _ | Array_get _ | Class_get _ | Unsafeexpr _) -> ()
   | pos, Call ((_, Id (_, "tuple")), _) ->
       error_at env pos
         "Tuple cannot be used as an lvalue. Maybe you meant List?"
@@ -568,6 +568,9 @@ and toplevel_word ~attr env = function
   | "interface" ->
       let class_ = class_ ~attr ~final:false ~kind:Cinterface env in
       [Class class_]
+  | "enum" ->
+      let class_ = enum_ ~attr env in
+      [Class class_]
   | "async" ->
       expect_word env "function";
       let fun_ = fun_ ~attr ~sync:FAsync env in
@@ -703,7 +706,7 @@ and fun_ ~attr ~sync env =
     f_ret = ret;
     f_body = body;
     f_user_attributes = attr;
-    f_type = sync;
+    f_fun_kind = sync;
     f_mode = env.mode;
     f_mtime = 0.0;
     f_namespace = Namespace_env.empty;
@@ -732,9 +735,66 @@ and class_ ~attr ~final ~kind env =
       c_extends         = cextends;
       c_body            = cbody;
       c_namespace       = Namespace_env.empty;
+      c_enum            = None;
     }
   in
   class_implicit_fields result
+
+(*****************************************************************************)
+(* Enums *)
+(*****************************************************************************)
+
+and enum_base_ty env =
+  expect env Tcolon;
+  let h = hint env in
+  h
+
+and enum_ ~attr env =
+  let cname       = identifier env in
+  let basety      = enum_base_ty env in
+  let constraint_ = typedef_constraint env in
+  let cbody       = enum_body env in
+  let result =
+    { c_mode            = env.mode;
+      c_final           = false;
+      c_kind            = Cenum;
+      c_is_xhp          = false;
+      c_implements      = [];
+      c_tparams         = [];
+      c_user_attributes = attr;
+      c_name            = cname;
+      c_extends         = [];
+      c_body            = cbody;
+      c_namespace       = Namespace_env.empty;
+      c_enum            = Some
+        { e_base       = basety;
+          e_constraint = constraint_;
+        }
+    }
+  in
+  result
+
+(* { ... *)
+and enum_body env =
+  expect env Tlcb;
+  enum_defs env
+
+and enum_defs env =
+  match peek env with
+  (* ... } *)
+  | Trcb ->
+      drop env;
+      []
+  | Tword ->
+    let const = class_const env in
+    let elem = Const (None, [const]) in
+    expect env Tsc;
+    let rest = enum_defs env in
+    elem :: rest
+  | _ ->
+    error_expect env "enum const declaration";
+    []
+
 
 (*****************************************************************************)
 (* Extends/Implements *)
@@ -901,17 +961,21 @@ and hint env =
       let start = Pos.make env.lb in
       let e = hint env in
       Pos.btw start (fst e), Hoption e
-  (* A<_> | function(_):_ *)
-  | Tword ->
+  (* A<_> *)
+  | Tword when Lexing.lexeme env.lb <> "function" ->
       let pos = Pos.make env.lb in
       let word = Lexing.lexeme env.lb in
-      hint_word env pos word
+      class_hint_with_name env (pos, word)
+  | Tword ->
+      let h = hint_function env in
+      error_at env (fst h) "Function hints must be parenthesized";
+      h
   (* :XHPNAME *)
   | Tcolon ->
       L.back env.lb;
       let cname = identifier env in
       class_hint_with_name env cname
-  (* (_) *)
+  (* (_) | (function(_): _) *)
   | Tlp ->
       let start_pos = Pos.make env.lb in
       hint_paren start_pos env
@@ -925,27 +989,25 @@ and hint env =
       let pos = Pos.make env.lb in
       pos, Happly ((pos, "*Unknown*"), [])
 
-and hint_word env pos word =
- (* function(_): _ *)
-  match word with
-  | "function" ->
-      hint_function pos env
-  (* A<_> *)
-  | name ->
-      class_hint_with_name env (pos, name)
-
-(* (_) *)
+(* (_) | (function(_): _) *)
 and hint_paren start env =
-  let hintl = hint_list env in
-  let end_ = Pos.make env.lb in
-  let pos = Pos.btw start end_ in
-  match hintl with
-  | []  -> assert false
-  | [_, Hfun _ as h] -> pos, snd h
-  | [_] ->
-      error_at env pos "Tuples of one element are not allowed";
-      pos, Happly ((pos, "*Unkown*"), [])
-  | hl  -> pos, Htuple hl
+  match L.token env.lb with
+  | Tword when Lexing.lexeme env.lb = "function" ->
+      let h = hint_function env in
+      if L.token env.lb <> Trp
+      then error_at env (fst h) "Function hints must be parenthesized";
+      Pos.btw start (Pos.make env.lb), (snd h)
+  | _ ->
+      L.back env.lb;
+      let hintl = hint_list env in
+      let end_ = Pos.make env.lb in
+      let pos = Pos.btw start end_ in
+      match hintl with
+      | []  -> assert false
+      | [_] ->
+          error_at env pos "Tuples of one element are not allowed";
+          pos, Happly ((pos, "*Unknown*"), [])
+      | hl  -> pos, Htuple hl
 
 and hint_list env =
   let error_state = !(env.errors) in
@@ -982,7 +1044,8 @@ and hint_list_remain env =
 (*****************************************************************************)
 
 (* function(_): _ *)
-and hint_function start env =
+and hint_function env =
+  let start = Pos.make env.lb in
   expect env Tlp;
   let params, has_dots = hint_function_params env in
   let ret = hint_return env in
@@ -1186,6 +1249,9 @@ and trait_require env =
 and xhp_format env =
   match L.token env.lb with
   | Tsc -> ()
+  | Teof ->
+      error_expect env "end of XHP category/attribute/children declaration";
+      ()
   | Tquote ->
       let pos = Pos.make env.lb in
       let abs_pos = env.lb.Lexing.lex_curr_pos in
@@ -1419,7 +1485,7 @@ and method_ env ~modifiers ~attrs ~sync pname =
     m_body = body;
     m_kind = modifiers;
     m_user_attributes = attrs;
-    m_type = sync;
+    m_fun_kind = sync;
   }
 
 (*****************************************************************************)
@@ -1518,6 +1584,14 @@ and ignore_body env =
   | Theredoc ->
       ignore (expr_heredoc env);
       ignore_body env
+  | Tword when (Lexing.lexeme env.lb) = "function" && peek env = Tlp ->
+  (* this covers the async case as well *)
+      let pos = Pos.make env.lb in
+      ignore (expr_anon_fun env pos ~sync:FSync);
+      ignore_body env
+  | Tlp ->
+      ignore (try_short_lambda env);
+      ignore_body env
   | Tlt when is_xhp env ->
       ignore (xhp env);
       ignore_body env
@@ -1599,16 +1673,18 @@ and statement_word env = function
 (*****************************************************************************)
 
 and statement_break env =
+  let stmt = Break (Pos.make env.lb) in
   check_continue env;
-  Break
+  stmt
 
 (*****************************************************************************)
 (* Continue statement *)
 (*****************************************************************************)
 
 and statement_continue env =
+  let stmt = Continue (Pos.make env.lb) in
   check_continue env;
-  Continue;
+  stmt
 
 and check_continue env =
   match L.token env.lb with
@@ -1855,23 +1931,29 @@ and for_last_expr env =
 and statement_foreach env =
   expect env Tlp;
   let e = expr env in
+  let await =
+    match L.token env.lb with
+    | Tword when Lexing.lexeme env.lb = "await" -> Some (Pos.make env.lb)
+    | _ -> L.back env.lb; None in
   expect_word env "as";
   let as_expr = foreach_as env in
   let st = statement env in
-  Foreach (e, as_expr, [st])
+  Foreach (e, await, as_expr, [st])
 
 and foreach_as env =
   let e1 = expr env in
   match L.token env.lb with
   | Tsarrow ->
       let e2 = expr env in
+      check_lvalue env e2;
       expect env Trp;
       As_kv (e1, e2)
   | Trp ->
-      As_id e1
+      check_lvalue env e1;
+      As_v e1
   | _ ->
       error_expect env ")";
-      As_id e1
+      As_v e1
 
 (*****************************************************************************)
 (* Try statement *)
@@ -2198,7 +2280,7 @@ and lambda_expr_body : env -> block = fun env ->
   let (p, e1) = expr env in
   [Return (p, (Some (p, e1)))]
 
-and lambda_body env params ret =
+and lambda_body env params ret ~sync =
   let body =
     if peek env = Tlcb
     then function_body env
@@ -2211,7 +2293,7 @@ and lambda_body env params ret =
     f_ret = ret;
     f_body = body;
     f_user_attributes = Utils.SMap.empty;
-    f_type = FSync;
+    f_fun_kind = sync;
     f_mode = env.mode;
     f_mtime = 0.0;
     f_namespace = Namespace_env.empty;
@@ -2229,9 +2311,9 @@ and make_lambda_param : id -> fun_param = fun var_id ->
     param_user_attributes = Utils.SMap.empty;
   }
 
-and lambda_single_arg env var_id =
+and lambda_single_arg env var_id ~sync =
   expect env Tlambda;
-  lambda_body env [make_lambda_param var_id] None
+  lambda_body env [make_lambda_param var_id] None ~sync
 
 and try_short_lambda env =
   try_parse env begin fun env ->
@@ -2249,7 +2331,7 @@ and try_short_lambda env =
       then None
       else begin
         drop env;
-        Some (lambda_body env param_list ret)
+        Some (lambda_body env param_list ret ~sync:FSync)
       end
     end
   end
@@ -2277,7 +2359,7 @@ and expr_atomic ?(allow_class=false) env  =
       let tok_value = Lexing.lexeme env.lb in
       let var_id = (pos, tok_value) in
       pos, if peek env = Tlambda
-           then lambda_single_arg env var_id
+           then lambda_single_arg env var_id ~sync:FSync
            else Lvar var_id
   | Tcolon ->
       L.back env.lb;
@@ -2315,6 +2397,10 @@ and expr_atomic ?(allow_class=false) env  =
       error env ("A valid variable name starts with a letter or underscore,"^
         "followed by any number of letters, numbers, or underscores");
       expr env
+  | Tunsafeexpr ->
+      let e = expr env in
+      let end_ = Pos.make env.lb in
+      Pos.btw pos end_, Unsafeexpr e
   | _ ->
       error_expect env "expression";
       pos, Null
@@ -2547,20 +2633,21 @@ and expr_php_list env start =
 (* Anonymous functions *)
 (*****************************************************************************)
 
-and is_function env =
-  look_ahead env begin fun env ->
-    let tok = L.token env.lb in
-    tok = Tword &&
-    Lexing.lexeme env.lb = "function"
-  end
-
 and expr_anon_async env pos =
-  if is_function env
-  then begin
-    expect_word env "function";
-    expr_anon_fun env pos ~sync:FAsync
-  end
-  else pos, Id (pos, "async")
+  match L.token env.lb with
+  | Tword when Lexing.lexeme env.lb = "function" ->
+      expr_anon_fun env pos ~sync:FAsync
+  | Tlvar ->
+      let var_pos = Pos.make env.lb in
+      pos, lambda_single_arg env (var_pos, Lexing.lexeme env.lb) ~sync:FAsync
+  | Tlp ->
+      let param_list = parameter_list_remain env in
+      let ret = hint_return_opt env in
+      expect env Tlambda;
+      pos, lambda_body env param_list ret ~sync:FAsync
+  | _ ->
+      L.back env.lb;
+      pos, Id (pos, "async")
 
 and expr_anon_fun env pos ~sync =
   let env = { env with priority = 0 } in
@@ -2575,7 +2662,7 @@ and expr_anon_fun env pos ~sync =
     f_ret = ret;
     f_body = body;
     f_user_attributes = Utils.SMap.empty;
-    f_type = sync;
+    f_fun_kind = sync;
     f_mode = env.mode;
     f_mtime = 0.0;
     f_namespace = Namespace_env.empty;
@@ -2644,15 +2731,27 @@ and expr_new env pos_start =
 (*****************************************************************************)
 
 and is_cast_type = function
-  | "int" | "float" | "double" | "string"
-  | "array" | "object" | "bool" | "unset" -> true
-  | _ -> false
+    | "int" | "float" | "double" | "string"
+    | "array" | "object" | "bool" | "unset" -> true
+    | _ -> false
 
+(* (int), (float), etc are considered cast tokens by HHVM, so we will always
+ * interpret them as casts. I.e. (object) >> 1 is a parse error because it is
+ * trying to cast the malformed expression `>> 1` to an object. On the other
+ * hand, (x) >> 1 is parsed like `x >> 1`, because (x) is not a cast token. *)
 and is_cast env =
   look_ahead env begin fun env ->
-    let _ = L.token env.lb in
-    is_cast_type (Lexing.lexeme env.lb) &&
-    L.token env.lb = Trp
+    L.token env.lb = Tword &&
+    let cast_name = Lexing.lexeme env.lb in
+    L.token env.lb = Trp && begin
+      is_cast_type cast_name ||
+      match L.token env.lb with
+      (* We cannot be making a cast if the next token is a binary / ternary
+       * operator, or if it's the end of a statement (i.e. a semicolon.) *)
+      | Tqm | Tsc | Tstar | Tslash | Txor | Tpercent | Tlt | Tgt | Tltlt | Tgtgt
+      | Tlb | Trb | Tdot | Tlambda -> false
+      | _ -> true
+    end
   end
 
 and expr_cast env start_pos =
@@ -2660,14 +2759,11 @@ and expr_cast env start_pos =
     let tok = L.token env.lb in
     let cast_type = Lexing.lexeme env.lb in
     assert (tok = Tword);
-    assert (is_cast_type cast_type);
+    let p = Pos.make env.lb in
     expect env Trp;
-    let ty = Pos.make env.lb, cast_type in
-    let ty = fst ty, Happly (ty, []) in
+    let ty = p, Happly ((p, cast_type), []) in
     let e = expr env in
-    match cast_type with
-    | "unset" -> e
-    | _ -> Pos.btw start_pos (fst e), Cast (ty, e)
+    Pos.btw start_pos (fst e), Cast (ty, e)
   end
 
 (*****************************************************************************)

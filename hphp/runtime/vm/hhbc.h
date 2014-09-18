@@ -29,15 +29,19 @@ namespace HPHP {
 
 struct Unit;
 
-// Variable-size immediates are implemented as follows. To determine which size
-// the immediate is, examine the first byte where the immediate is expected, and
-// examine its low-order bit. If it is zero, it's a 1-byte immediate; otherwise,
-// it's 4 bytes. The immediate has to be logical-shifted to the right by one to
-// get rid of the flag bit.
-
-// The types in this macro for MA, BLA, and SLA are meaningless since
-// they are never read out of ArgUnion (they use ImmVector and
-// ImmVectorO).
+/*
+ * Variable-size immediates are implemented as follows: To determine which size
+ * the immediate is, examine the first byte where the immediate is expected,
+ * and examine its low-order bit.  If it is zero, it's a 1-byte immediate;
+ * otherwise, it's 4 bytes.  The immediate has to be logical-shifted to the
+ * right by one to get rid of the flag bit.
+ *
+ * The types in this macro for MA, BLA, and SLA are meaningless since they are
+ * never read out of ArgUnion (they use ImmVector and ImmVectorO).
+ *
+ * ArgTypes and their various decoding helpers should be kept in sync with the
+ * `hhx' bytecode inspection GDB command.
+ */
 #define ARGTYPES                                                          \
   ARGTYPE(NA,     void*)         /* unused */                             \
   ARGTYPEVEC(MA,  int32_t)       /* Member vector immediate */            \
@@ -481,6 +485,9 @@ constexpr int32_t kMaxConcatN = 4;
   O(Array,           ONE(AA),          NOV,             ONE(CV),    NF) \
   O(NewArray,        ONE(IVA),         NOV,             ONE(CV),    NF) \
   O(NewMixedArray,   ONE(IVA),         NOV,             ONE(CV),    NF) \
+  O(NewVArray,       ONE(IVA),         NOV,             ONE(CV),    NF) \
+  O(NewMIArray,      ONE(IVA),         NOV,             ONE(CV),    NF) \
+  O(NewMSArray,      ONE(IVA),         NOV,             ONE(CV),    NF) \
   O(NewLikeArrayL,   TWO(LA,IVA),      NOV,             ONE(CV),    NF) \
   O(NewPackedArray,  ONE(IVA),         CMANY,           ONE(CV),    NF) \
   O(NewStructArray,  ONE(VSA),         SMANY,           ONE(CV),    NF) \
@@ -957,6 +964,12 @@ Offset* instrJumpOffset(const Op* instr);
 //   cannot jump
 Offset instrJumpTarget(const Op* instrs, Offset pos);
 
+/*
+ * Returns the set of bytecode offsets for the instructions that may
+ * be executed immediately after opc.
+ */
+OffsetSet instrSuccOffsets(Op* opc, const Unit* unit);
+
 struct StackTransInfo {
   enum class Kind {
     PushPop,
@@ -969,6 +982,7 @@ struct StackTransInfo {
 };
 
 bool instrIsNonCallControlFlow(Op opcode);
+bool instrHasConditionalBranch(Op opcode);
 bool instrAllowsFallThru(Op opcode);
 bool instrReadsCurrentFpi(Op opcode);
 

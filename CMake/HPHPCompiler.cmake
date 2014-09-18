@@ -22,7 +22,7 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
 # using GCC
 elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
-  execute_process(COMMAND ${CMAKE_CXX_COMPILER} -dumpversion OUTPUT_VARIABLE GCC_VERSION)
+  execute_process(COMMAND ${CMAKE_CXX_COMPILER} ${CMAKE_CXX_COMPILER_ARG1} -dumpversion OUTPUT_VARIABLE GCC_VERSION)
   set(GNUCC49_OPT "")
   if (NOT (GCC_VERSION VERSION_GREATER 4.8 OR GCC_VERSION VERSION_EQUAL 4.8))
     message(FATAL_ERROR "${PROJECT_NAME} requires g++ 4.8 or greater.")
@@ -52,18 +52,17 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g")
   set(CMAKE_C_FLAGS                  "${GNUCC49_OPT} -w")
   set(CMAKE_CXX_FLAGS "-Wall -std=gnu++11 -fno-gcse -fno-omit-frame-pointer -ftemplate-depth-180 -Woverloaded-virtual -Wno-deprecated -Wno-strict-aliasing -Wno-write-strings -Wno-invalid-offsetof -fno-operator-names -Wno-error=array-bounds -Wno-error=switch -Werror=format-security -Wno-unused-result -Wno-sign-compare -Wno-attributes -Wno-maybe-uninitialized -Wno-unused-local-typedefs -fno-canonical-system-headers -Wno-deprecated-declarations ${GNUCC49_OPT} ${GNUCC_PLAT_OPT}")
-  if(APPLE OR STATIC_CXX_LIB)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static-libgcc")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
+  if(STATIC_CXX_LIB)
+    set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
   endif()
   if(CYGWIN)
   # in debug mode large files can overflow pe/coff sections
   # this switches binutils to use the pe+ format
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -Wa,-mbig-obj")
     # stack limit is set at compile time on windows
-    # code expects a minimum of 8 * 1024 * 1024
+    # code expects a minimum of 8 * 1024 * 1024 + 8 for a buffer
     # the default is 2 mb
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--stack,8388608")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--stack,8388616")
   endif()
 # using Intel C++
 elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Intel")

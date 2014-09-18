@@ -19,7 +19,6 @@
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-url.h"
-#include "hphp/runtime/base/zend-printf.h"
 #include "hphp/runtime/base/zend-scanf.h"
 #include "hphp/runtime/base/bstring.h"
 #include "hphp/runtime/base/request-local.h"
@@ -426,8 +425,7 @@ String stringTrim(String& str, const String& charlist) {
       char* sdata = str.bufferSlice().ptr;
       for (int idx = 0; start < len;) sdata[idx++] = sdata[start++];
     }
-    str.shrink(slen);
-    return str;
+    return String(str.get()->shrink(slen));
   }
 
   return str.substr(start, end - start + 1);
@@ -777,32 +775,6 @@ String f_str_repeat(const String& input, int multiplier) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-Variant f_printf(int _argc, const String& format, const Array& _argv /* = null_array */) {
-  String output = string_printf(format.data(), format.size(), _argv);
-  if (output.isNull()) return false;
-  g_context->write(output.data(), output.size());
-  return output.size();
-}
-
-Variant f_vprintf(const String& format, const Array& args) {
-  String output = string_printf(format.data(), format.size(), args);
-  if (output.isNull()) return false;
-  g_context->write(output.data(), output.size());
-  return output.size();
-}
-
-Variant f_sprintf(int _argc, const String& format, const Array& _argv /* = null_array */) {
-  String output = string_printf(format.data(), format.size(), _argv);
-  if (output.isNull()) return false;
-  return output;
-}
-
-Variant f_vsprintf(const String& format, const Array& args) {
-  String output = string_printf(format.data(), format.size(), args);
-  if (output.isNull()) return false;
-  return output;
-}
-
 Variant f_sscanf(int _argc,
                  const String& str,
                  const String& format,
@@ -940,12 +912,17 @@ Variant f_strstr(const String& haystack, const Variant& needle,
   }
 }
 
-Variant f_stristr(const String& haystack, const Variant& needle) {
+Variant f_stristr(const String& haystack, const Variant& needle,
+                  bool before_needle /* = false */) {
   Variant ret = f_stripos(haystack, needle);
   if (same(ret, false)) {
     return false;
   }
-  return haystack.substr(ret.toInt32());
+  if (before_needle) {
+    return haystack.substr(0, ret.toInt32());
+  } else {
+    return haystack.substr(ret.toInt32());
+  }
 }
 
 template<bool existence_only>
@@ -1497,6 +1474,9 @@ String f_quoted_printable_decode(const String& str) {
 Variant f_convert_uudecode(const String& data) {
   String ret = StringUtil::UUDecode(data);
   if (ret.isNull()) {
+    raise_warning(
+      "convert_uudecode(): "
+      "The given parameter is not a valid uuencoded string");
     return false; // bad format
   }
   return ret;

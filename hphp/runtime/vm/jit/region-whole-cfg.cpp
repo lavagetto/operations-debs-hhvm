@@ -24,13 +24,9 @@
 #include "hphp/runtime/vm/jit/trans-cfg.h"
 #include "hphp/util/trace.h"
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(pgo);
-
-using boost::container::flat_set;
-using boost::container::flat_map;
 
 struct DFS {
   DFS(const ProfData* p, const TransCFG& c, TransIDSet& ts, TransIDVec* tv)
@@ -74,14 +70,15 @@ struct DFS {
       // TODO(#2589970): Fix translateRegion to support mid-region reffiness
       // checks
       auto dstRegion = profData->transRegion(dst);
-      auto nRefDeps = dstRegion->blocks[0]->reffinessPreds().size();
+      auto nRefDeps = dstRegion->entry()->reffinessPreds().size();
       if (nRefDeps > 0) {
         continue;
       }
 
       // Add the block and arc to region.
-      auto predBlockId = profData->transRegion(tid)->blocks.back().get()->id();
-      auto dstBlockId = dstRegion->blocks.front().get()->id();
+      auto predBlockId =
+          profData->transRegion(tid)->blocks().back().get()->id();
+      auto dstBlockId = dstRegion->blocks().front().get()->id();
       region->addArc(predBlockId, dstBlockId);
 
       // Push the dst if we haven't already processed it.
@@ -98,12 +95,7 @@ struct DFS {
  private:
   void select(TransID tid) {
     auto transRegion = profData->transRegion(tid);
-    region->blocks.insert(region->blocks.begin(),
-                          transRegion->blocks.begin(),
-                          transRegion->blocks.end());
-    region->arcs.insert(region->arcs.begin(),
-                        transRegion->arcs.begin(),
-                        transRegion->arcs.end());
+    region->prepend(*transRegion);
     selectedSet.insert(tid);
     if (selectedVec) selectedVec->insert(selectedVec->begin(), tid);
   }
@@ -117,8 +109,8 @@ struct DFS {
   RegionDescPtr region;
 
   std::unordered_set<TransID> visiting;
-  flat_set<TransID> visited;
-  flat_map<SrcKey, TransID> srcKeyToTransID;
+  boost::container::flat_set<TransID> visited;
+  boost::container::flat_map<SrcKey, TransID> srcKeyToTransID;
 };
 
 /*

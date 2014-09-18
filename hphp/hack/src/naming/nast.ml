@@ -85,6 +85,12 @@ and class_ = {
   c_static_methods : method_ list     ;
   c_methods        : method_ list     ;
   c_user_attributes : Ast.user_attribute SMap.t;
+  c_enum           : enum_ option     ;
+}
+
+and enum_ = {
+  e_base       : hint;
+  e_constraint : hint option;
 }
 
 and tparam = sid * hint option
@@ -110,8 +116,14 @@ and method_ = {
   m_body            : block                     ;
   m_user_attributes : Ast.user_attribute SMap.t ;
   m_ret             : hint option               ;
-  m_type            : Ast.fun_type              ;
+  m_fun_kind        : fun_kind                  ;
 }
+
+and fun_kind =
+  | FSync
+  | FGenerator
+  | FAsync
+  | FAsyncGenerator
 
 and visibility =
   | Private
@@ -143,7 +155,7 @@ and fun_ = {
   f_variadic : fun_variadicity;
   f_params   : fun_param list;
   f_body     : block;
-  f_type     : Ast.fun_type;
+  f_fun_kind : fun_kind;
 }
 
 and typedef = tparam list * hint option * hint
@@ -157,8 +169,8 @@ and gconst = {
 
 and stmt =
   | Expr of expr
-  | Break
-  | Continue
+  | Break of Pos.t
+  | Continue of Pos.t
   | Throw of is_terminal * expr
   | Return of Pos.t * expr option
   | Static_var of expr list
@@ -173,8 +185,10 @@ and stmt =
   | Fallthrough
 
 and as_expr =
-  | As_id of expr
+  | As_v of expr
   | As_kv of expr * expr
+  | Await_as_v of Pos.t * expr
+  | Await_as_kv of Pos.t * expr * expr
 
 and block = stmt list
 

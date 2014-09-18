@@ -18,7 +18,7 @@
 #include "hphp/runtime/ext/reflection/ext_reflection.h"
 #include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/ext/debugger/ext_debugger.h"
-#include "hphp/runtime/ext/ext_misc.h"
+#include "hphp/runtime/ext/std/ext_std_misc.h"
 #include "hphp/runtime/ext/ext_string.h"
 #include "hphp/runtime/ext/ext_collections.h"
 #include "hphp/runtime/base/externals.h"
@@ -160,17 +160,6 @@ Array HHVM_FUNCTION(hphp_get_extension_info, const String& name) {
   return ret;
 }
 
-// TODO(ptc) This is horse--...play and should go somewhere else
-Array HHVM_FUNCTION(hphp_miarray) {
-  auto ad = MixedArray::MakeReserveIntMap(10);
-  return Array::attach(ad);
-}
-
-Array HHVM_FUNCTION(hphp_msarray) {
-  auto ad = MixedArray::MakeReserveStrMap(10);
-  return Array::attach(ad);
-}
-
 int get_modifiers(Attr attrs, bool cls) {
   int php_modifier = 0;
   if (attrs & AttrAbstract)  php_modifier |= cls ? 0x20 : 0x02;
@@ -232,7 +221,7 @@ static void set_doc_comment(Array& ret,
                             bool isBuiltin) {
   if (comment == nullptr || comment->empty()) {
     set_empty_doc_comment(ret);
-  } else if (isBuiltin && !f_hphp_debugger_attached()) {
+  } else if (isBuiltin && !HHVM_FUNCTION(hphp_debugger_attached)) {
     set_empty_doc_comment(ret);
   } else {
     ret.set(s_doc, VarNR(comment));
@@ -447,10 +436,6 @@ String HHVM_FUNCTION(hphp_get_original_class_name, const String& name) {
   return cls->nameStr();
 }
 
-bool HHVM_FUNCTION(hphp_scalar_typehints_enabled) {
-  return RuntimeOption::EnableHipHopSyntax;
-}
-
 ObjectData* Reflection::AllocReflectionExceptionObject(const Variant& message) {
   ObjectData* inst = ObjectData::newInstance(s_ReflectionExceptionClass);
   TypedValue ret;
@@ -501,7 +486,7 @@ static Variant HHVM_METHOD(ReflectionFunctionAbstract, getDocComment) {
   auto const comment = func->docComment();
   if (comment == nullptr || comment->empty()) {
     return false_varNR;
-  } else if (func->isBuiltin() && !f_hphp_debugger_attached()) {
+  } else if (func->isBuiltin() && !HHVM_FUNCTION(hphp_debugger_attached)) {
     return false_varNR;
   } else {
     auto ret = const_cast<StringData*>(comment);
@@ -944,7 +929,7 @@ static Variant HHVM_METHOD(ReflectionClass, getDocComment) {
   auto const comment = pcls->docComment();
   if (comment == nullptr || comment->empty()) {
     return false_varNR;
-  } else if (pcls->isBuiltin() && !f_hphp_debugger_attached()) {
+  } else if (pcls->isBuiltin() && !HHVM_FUNCTION(hphp_debugger_attached)) {
     return false_varNR;
   } else {
     auto ret = const_cast<StringData*>(comment);
@@ -1291,14 +1276,11 @@ class ReflectionExtension : public Extension {
     HHVM_FE(hphp_create_object);
     HHVM_FE(hphp_create_object_without_constructor);
     HHVM_FE(hphp_get_extension_info);
-    HHVM_FE(hphp_miarray);
-    HHVM_FE(hphp_msarray);
     HHVM_FE(hphp_get_original_class_name);
     HHVM_FE(hphp_get_property);
     HHVM_FE(hphp_get_static_property);
     HHVM_FE(hphp_invoke);
     HHVM_FE(hphp_invoke_method);
-    HHVM_FE(hphp_scalar_typehints_enabled);
     HHVM_FE(hphp_set_property);
     HHVM_FE(hphp_set_static_property);
 

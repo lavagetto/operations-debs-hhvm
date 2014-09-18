@@ -25,7 +25,7 @@ namespace HPHP {
 struct Func;
 struct SrcKey;
 
-namespace JIT {
+namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct RegionDesc;
@@ -69,6 +69,17 @@ struct InliningDecider {
   InliningDecider& disable() {
     m_disabled = true;
     return *this;
+  }
+
+  /*
+   * Reset inlining state.
+   *
+   * Forget all current information about inlining cost and depth, preserving
+   * only m_topFunc and m_disabled.
+   */
+  void resetState() {
+    m_cost = m_callDepth = m_stackDepth = 0;
+    m_costStack.clear();
   }
 
   /*

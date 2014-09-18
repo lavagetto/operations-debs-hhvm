@@ -22,7 +22,7 @@
 #include "hphp/runtime/vm/jit/simplifier.h"
 #include "hphp/runtime/vm/jit/timer.h"
 
-namespace HPHP {  namespace JIT {
+namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(hhir);
 
@@ -32,7 +32,7 @@ IRUnit::IRUnit(TransContext context)
 {}
 
 IRInstruction* IRUnit::defLabel(unsigned numDst, BCMarker marker,
-                                const smart::vector<unsigned>& producedRefs) {
+                                const jit::vector<unsigned>& producedRefs) {
   IRInstruction inst(DefLabel, marker);
   IRInstruction* label = cloneInstruction(&inst);
   always_assert(producedRefs.size() == numDst);
@@ -121,7 +121,7 @@ void IRUnit::collectPostConditions() {
   Trace::Indent _i;
 
   for (auto* block : rpoSortCfg(*this)) {
-    state.startBlock(block);
+    state.startBlock(block, block->front().marker());
 
     for (auto& inst : *block) {
       state.setMarker(inst.marker());

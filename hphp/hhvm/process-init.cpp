@@ -32,6 +32,8 @@
 #include "hphp/system/systemlib.h"
 #include "hphp/util/logger.h"
 
+#include <folly/experimental/Singleton.h>
+
 #include <libgen.h> // For dirname(3).
 #include <string>
 
@@ -53,8 +55,8 @@ SYSTEMLIB_CLASSES(SYSTEM_CLASS_STRING)
 
 void ProcessInit() {
   // Create the global mcg object
-  JIT::mcg = new JIT::MCGenerator();
-  JIT::mcg->initUniqueStubs();
+  jit::mcg = new jit::MCGenerator();
+  jit::mcg->initUniqueStubs();
 
   // Save the current options, and set things up so that
   // systemlib.php can be read from and stored in the
@@ -171,6 +173,8 @@ void ProcessInit() {
   RuntimeOption::EvalDumpBytecode = db;
   RuntimeOption::EvalAllowHhas = ah;
   Option::WholeProgram = wp;
+
+  folly::SingletonVault::singleton()->registrationComplete();
 }
 
 ///////////////////////////////////////////////////////////////////////////////

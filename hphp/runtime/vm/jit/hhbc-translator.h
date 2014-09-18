@@ -34,8 +34,7 @@
 #include "hphp/runtime/vm/jit/translator-instrs.h"
 #include "hphp/runtime/vm/srckey.h"
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 
 struct PropInfo;
 
@@ -45,11 +44,10 @@ enum class IRGenMode {
 };
 
 enum JmpFlags {
-  JmpFlagNone          = 0,
-  JmpFlagBreakTracelet = 1,
-  JmpFlagNextIsMerge   = 2,
-  JmpFlagBothPaths     = 4,
-  JmpFlagSurprise      = 8
+  JmpFlagNone        = 0,
+  JmpFlagEndsRegion  = 1,
+  JmpFlagNextIsMerge = 2,
+  JmpFlagSurprise    = 4
 };
 
 inline JmpFlags operator|(JmpFlags f1, JmpFlags f2) {
@@ -214,6 +212,9 @@ public:
   void emitArray(int arrayId);
   void emitNewArray(int capacity);
   void emitNewMixedArray(int capacity);
+  void emitNewVArray(int capacity);
+  void emitNewMIArray(int capacity);
+  void emitNewMSArray(int capacity);
   void emitNewLikeArrayL(int id, int capacity);
   void emitNewPackedArray(int n);
   void emitNewStructArray(uint32_t n, StringData** keys);
@@ -496,7 +497,7 @@ public:
   void emitDecodeCufIter(uint32_t iterId, int targetOffset,
                     JmpFlags jmpFlags);
   void emitCIterFree(uint32_t iterId);
-  void emitIterBreak(const ImmVector& iv, uint32_t offset, bool breakTracelet);
+  void emitIterBreak(const ImmVector& iv, uint32_t offset, bool endsRegion);
   void emitVerifyParamType(uint32_t paramId);
 
   // generators
@@ -591,8 +592,7 @@ private:
     SSATmp* emitArrayGet(SSATmp* key);
     void emitProfiledArrayGet(SSATmp* key);
     void emitArrayIsset();
-    SSATmp* emitPackedArrayGet(SSATmp* base, SSATmp* key,
-                               bool profiled = false);
+    SSATmp* emitPackedArrayGet(SSATmp* base, SSATmp* key);
     void emitPackedArrayIsset();
     void emitStringGet(SSATmp* key);
     void emitStringIsset();
@@ -782,7 +782,7 @@ private:
 
   folly::Optional<Type> interpOutputType(const NormalizedInstruction&,
                                          folly::Optional<Type>&) const;
-  smart::vector<InterpOneData::LocalType>
+  jit::vector<InterpOneData::LocalType>
   interpOutputLocals(const NormalizedInstruction&, bool& smashAll,
                      folly::Optional<Type> pushedType);
 
@@ -848,9 +848,9 @@ private: // Exit trace creation routines.
   Block* makeCatchNoSpill();
 
   /*
-   * Create a block for a branch target that will be generated later.
+   * Returns an IR block corresponding to the given offset.
    */
-  Block* makeBlock(Offset offset);
+  Block* getBlock(Offset offset);
 
   /*
    * Implementation for the above.  Takes spillValues, target offset,
@@ -1000,6 +1000,6 @@ private:
 
 //////////////////////////////////////////////////////////////////////
 
-}} // namespace HPHP::JIT
+}} // namespace HPHP::jit
 
 #endif

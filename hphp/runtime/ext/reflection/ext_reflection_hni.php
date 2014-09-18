@@ -214,10 +214,8 @@ abstract class ReflectionFunctionAbstract implements Reflector {
   private static function stripHHPrefix($str) {
     if (!is_string($str)) return $str;
     return str_ireplace(
-      array('HH\\bool', 'HH\\int', 'HH\\float', 'HH\\string', 'HH\\num',
-            'HH\\resource', 'HH\\void', 'HH\\this'),
-      array('bool',     'int',     'float',     'string',     'num',
-            'resource',     'void',    'this'),
+      array('HH\\this'),
+      array('this'),
       $str
     );
   }
@@ -238,9 +236,13 @@ abstract class ReflectionFunctionAbstract implements Reflector {
     return hphp_array_idx($this->getAttributes(), $name, null);
   }
 
-  abstract public function getAttributesRecursive(): array;
+  public function getAttributesRecursive(): array {
+    return $this->getAttributes();
+  }
 
-  abstract public function getAttributeRecursive($name);
+  public function getAttributeRecursive($name) {
+    return $this->getAttribute($name);
+  }
 
   <<__Native>>
   public function getNumberOfParameters(): int;
@@ -340,7 +342,7 @@ abstract class ReflectionFunctionAbstract implements Reflector {
   }
 
   // Implementation of __toString
-  final protected function toString(
+  final protected function __toStringHelper(
     $type,
     array $preAttrs = [],
     array $funcAttrs = [],
@@ -386,7 +388,7 @@ abstract class ReflectionFunctionAbstract implements Reflector {
     $params = $this->getParameters();
     $ret .= "\n  - Parameters [" . count($params) . "] {\n  ";
     foreach ($params as $param) {
-      $ret .= '  ' . str_replace("\n", "\n  ", (string)$param);
+      $ret .= '  '.str_replace("\n", "\n  ", $param."\n");
     }
     $ret .= "}\n";
 
@@ -394,11 +396,6 @@ abstract class ReflectionFunctionAbstract implements Reflector {
     return $ret;
   }
 }
-
-<<__Native>>
-function hphp_miarray(): array;
-<<__Native>>
-function hphp_msarray(): array;
 
 
 /**
@@ -473,9 +470,9 @@ class ReflectionFunction extends ReflectionFunctionAbstract {
     $static_cls = get_class($this);
     if (property_exists($static_cls, $name)) {
       // __get is called if an existing property is inaccessible
-      trigger_error("Cannot access property $static_cls::$name", E_USER_ERROR);
+      trigger_error("Cannot access property $static_cls::$name", E_ERROR);
     }
-    trigger_error("Undefined property $static_cls::$name", E_USER_NOTICE);
+    trigger_error("Undefined property $static_cls::$name", E_NOTICE);
     return null;
   }
 
@@ -489,7 +486,7 @@ class ReflectionFunction extends ReflectionFunctionAbstract {
     if (property_exists(get_class($this), $name)) {
       // __set is called if the property is inaccessible
       trigger_error(
-        'Cannot access property '.get_class($this).'::'.$name, E_USER_ERROR);
+        'Cannot access property '.get_class($this).'::'.$name, E_ERROR);
     }
     $this->{$name} = $value;
   }
@@ -509,7 +506,7 @@ class ReflectionFunction extends ReflectionFunctionAbstract {
    * @return     string  A representation of this ReflectionFunction.
    */
   public function __toString(): string {
-    return $this->toString($this->isClosure() ? 'Closure' : 'Function');
+    return $this->__toStringHelper($this->isClosure() ? 'Closure' : 'Function');
   }
 
   /**
@@ -615,14 +612,6 @@ class ReflectionFunction extends ReflectionFunctionAbstract {
     }
     return null;
   }
-
-  public function getAttributesRecursive(): array {
-    return $this->getAttributes();
-  }
-
-  public function getAttributeRecursive($name) {
-    return $this->getAttribute($name);
-  }
 }
 
 /**
@@ -695,9 +684,9 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
     $static_cls = get_class($this);
     if (property_exists($static_cls, $name)) {
       // __get is called if an existing property is inaccessible
-      trigger_error("Cannot access property $static_cls::$name", E_USER_ERROR);
+      trigger_error("Cannot access property $static_cls::$name", E_ERROR);
     }
-    trigger_error("Undefined property $static_cls::$name", E_USER_NOTICE);
+    trigger_error("Undefined property $static_cls::$name", E_NOTICE);
     return null;
   }
 
@@ -711,7 +700,7 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
     if (property_exists(get_class($this), $name)) {
       // __set is called if the property is inaccessible
       trigger_error(
-        'Cannot access property '.get_class($this).'::'.$name, E_USER_ERROR);
+        'Cannot access property '.get_class($this).'::'.$name, E_ERROR);
     }
     $this->{$name} = $value;
   }
@@ -759,7 +748,7 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
       $funcAttrs[] = 'public';
     }
 
-    return $this->toString('Method', $preAttrs, $funcAttrs);
+    return $this->__toStringHelper('Method', $preAttrs, $funcAttrs);
   }
 
   /**
@@ -999,7 +988,7 @@ class ReflectionMethod extends ReflectionFunctionAbstract {
       if (!$object) {
         trigger_error(
           'ReflectionMethod::getClosure() expects parameter 1'
-          . ' to be object, ' . gettype($object) . ' given', E_USER_WARNING);
+          . ' to be object, ' . gettype($object) . ' given', E_WARNING);
         return null;
       }
       $cls_name = $this->getDeclaringClassname();
@@ -1305,9 +1294,9 @@ class ReflectionClass implements Reflector, Serializable {
     $static_cls = get_class($this);
     if (property_exists($static_cls, $name)) {
       // __get is called if an existing property is inaccessible
-      trigger_error("Cannot access property $static_cls::$name", E_USER_ERROR);
+      trigger_error("Cannot access property $static_cls::$name", E_ERROR);
     }
-    trigger_error("Undefined property $static_cls::$name", E_USER_NOTICE);
+    trigger_error("Undefined property $static_cls::$name", E_NOTICE);
     return null;
   }
 
@@ -1321,7 +1310,7 @@ class ReflectionClass implements Reflector, Serializable {
     if (property_exists(get_class($this), $name)) {
       // __set is called if the property is inaccessible
       trigger_error(
-        'Cannot access property '.get_class($this).'::'.$name, E_USER_ERROR);
+        'Cannot access property '.get_class($this).'::'.$name, E_ERROR);
     }
     $this->{$name} = $value;
   }

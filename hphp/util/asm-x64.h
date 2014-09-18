@@ -50,7 +50,7 @@
  */
 #define logical_const /* nothing */
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 #define TRACEMOD ::HPHP::Trace::asmx64
 
@@ -665,6 +665,9 @@ enum ConditionCode {
   CC_G    = 0x0F,
   CC_NLE  = 0x0F,
 };
+
+// names of condition codes, indexable by the ConditionCode enum value.
+extern const char* cc_names[];
 
 inline ConditionCode ccNegate(ConditionCode c) {
   return ConditionCode(int(c) ^ 1); // And you thought x86 was irregular!
