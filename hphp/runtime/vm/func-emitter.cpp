@@ -59,6 +59,8 @@ FuncEmitter::FuncEmitter(UnitEmitter& ue, int sn, Id id, const StringData* n)
   , isAsync(false)
   , isGenerator(false)
   , isPairGenerator(false)
+  , isMemoizeImpl(false)
+  , isMemoizeWrapper(false)
   , containsCalls(false)
   , docComment(nullptr)
   , originalFilename(nullptr)
@@ -87,6 +89,8 @@ FuncEmitter::FuncEmitter(UnitEmitter& ue, int sn, const StringData* n,
   , isAsync(false)
   , isGenerator(false)
   , isPairGenerator(false)
+  , isMemoizeImpl(false)
+  , isMemoizeWrapper(false)
   , containsCalls(false)
   , docComment(nullptr)
   , originalFilename(nullptr)
@@ -180,8 +184,11 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
   f->shared()->m_info = m_info;
   f->shared()->m_returnType = returnType;
   std::vector<Func::ParamInfo> fParams;
+  bool usesDoubles = false, variadic = false;
   for (unsigned i = 0; i < params.size(); ++i) {
     Func::ParamInfo pi = params[i];
+    if (pi.builtinType == KindOfDouble) usesDoubles = true;
+    if (pi.isVariadic()) variadic = true;
     f->appendParam(params[i].byRef, pi, fParams);
   }
 
@@ -222,8 +229,8 @@ Func* FuncEmitter::create(Unit& unit, PreClass* preClass /* = NULL */) const {
           f->shared()->m_nativeFuncPtr = nullptr;
         } else {
           f->shared()->m_nativeFuncPtr = nif;
-          f->shared()->m_builtinFuncPtr = m_pce ? Native::methodWrapper
-                                                : Native::functionWrapper;
+          f->shared()->m_builtinFuncPtr =
+            Native::getWrapper(m_pce, usesDoubles, variadic);
         }
       }
     } else {

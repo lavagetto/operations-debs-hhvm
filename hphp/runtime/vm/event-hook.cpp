@@ -22,6 +22,7 @@
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/ext/ext_function.h"
+#include "hphp/runtime/ext/ext_hotprofiler.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/runtime/base/thread-info.h"
@@ -58,6 +59,14 @@ void EventHook::EnableAsync() {
 
 void EventHook::DisableAsync() {
   ThreadInfo::s_threadInfo->m_reqInjectionData.clearAsyncEventHookFlag();
+}
+
+void EventHook::EnableDebug() {
+  ThreadInfo::s_threadInfo->m_reqInjectionData.setDebuggerHookFlag();
+}
+
+void EventHook::DisableDebug() {
+  ThreadInfo::s_threadInfo->m_reqInjectionData.clearDebuggerHookFlag();
 }
 
 void EventHook::EnableIntercept() {
@@ -144,7 +153,7 @@ void runUserProfilerOnFunctionExit(const ActRec* ar, const TypedValue* retval,
 }
 
 static Array get_frame_args_with_ref(const ActRec* ar) {
-  int numParams = ar->func()->numParams();
+  int numNonVariadic = ar->func()->numNonVariadicParams();
   int numArgs = ar->numArgs();
 
   PackedArrayInit retArray(numArgs);
@@ -152,18 +161,30 @@ static Array get_frame_args_with_ref(const ActRec* ar) {
   auto local = reinterpret_cast<TypedValue*>(
     uintptr_t(ar) - sizeof(TypedValue)
   );
-  for (int i = 0; i < numArgs; ++i) {
-    if (i < numParams) {
-      // This corresponds to one of the function's formal parameters, so it's
-      // on the stack.
-      retArray.appendWithRef(tvAsCVarRef(local));
-      --local;
-    } else {
-      // This is not a formal parameter, so it's in the ExtraArgs.
-      retArray.appendWithRef(tvAsCVarRef(ar->getExtraArg(i - numParams)));
-    }
+  int i = 0;
+  // The function's formal parameters are on the stack
+  for (; i < numArgs && i < numNonVariadic; ++i) {
+    retArray.appendWithRef(tvAsCVarRef(local));
+    --local;
   }
 
+  if (i < numArgs) {
+    // If there are still args that haven't been accounted for, they have
+    // either been ... :
+    if (ar->func()->hasVariadicCaptureParam()) {
+      // ... shuffled into a packed array stored in the variadic capture
+      // param on the stack
+      for (ArrayIter iter(tvAsCVarRef(local)); iter; ++iter) {
+        retArray.appendWithRef(iter.secondRef());
+      }
+    } else {
+      // ... or moved into the ExtraArgs datastructure.
+      for (; i < numArgs; ++i) {
+        retArray.appendWithRef(
+          tvAsCVarRef(ar->getExtraArg(i - numNonVariadic)));
+      }
+    }
+  }
   return retArray.toArray();
 }
 
@@ -272,10 +293,16 @@ void EventHook::onFunctionEnter(const ActRec* ar, int funcType, ssize_t flags) {
       runUserProfilerOnFunctionEnter(ar);
     }
     Profiler* profiler = ThreadInfo::s_threadInfo->m_profiler;
-    if (profiler != nullptr) {
+    if (profiler != nullptr &&
+        !(profiler->shouldSkipBuiltins() && ar->func()->isBuiltin())) {
       begin_profiler_frame(profiler,
                            GetFunctionNameForProfiler(ar->func(), funcType));
     }
+  }
+
+  // Debugger hook
+  if (flags & RequestInjectionData::DebuggerHookFlag) {
+    DEBUGGER_ATTACHED_ONLY(phpDebuggerFuncEntryHook(ar));
   }
 }
 
@@ -286,15 +313,18 @@ void EventHook::onFunctionExit(const ActRec* ar, const TypedValue* retval,
     Xenon::getInstance().log(Xenon::ExitSample);
   }
 
-  // User profiler
-  //
   // Inlined calls normally skip the function enter and exit events. If we
-  // side exit in an inlined callee, we want to make sure to skip the exit
-  // event to avoid unbalancing the call stack.
-  if ((flags & RequestInjectionData::EventHookFlag) &&
-      (JIT::TCA)ar->m_savedRip != JIT::mcg->tx().uniqueStubs.retInlHelper) {
+  // side exit in an inlined callee, we short-circuit here in order to skip
+  // exit events that could unbalance the call stack.
+  if ((jit::TCA) ar->m_savedRip == jit::mcg->tx().uniqueStubs.retInlHelper) {
+    return;
+  }
+
+  // User profiler
+  if (flags & RequestInjectionData::EventHookFlag) {
     Profiler* profiler = ThreadInfo::s_threadInfo->m_profiler;
-    if (profiler != nullptr) {
+    if (profiler != nullptr &&
+        !(profiler->shouldSkipBuiltins() && ar->func()->isBuiltin())) {
       // NB: we don't have a function type flag to match what we got in
       // onFunctionEnter. That's okay, though... we tolerate this in
       // TraceProfiler.
@@ -315,6 +345,11 @@ void EventHook::onFunctionExit(const ActRec* ar, const TypedValue* retval,
         // Avoid running PHP code when unwinding C++ exception.
       }
     }
+  }
+
+  // Debugger hook
+  if (flags & RequestInjectionData::DebuggerHookFlag) {
+    DEBUGGER_ATTACHED_ONLY(phpDebuggerFuncExitHook(ar));
   }
 }
 

@@ -43,6 +43,18 @@
 #define SET_AFFINITY(pid, size, mask)       \
         thread_policy_set(mach_thread_self(), THREAD_AFFINITY_POLICY, \
                           (int *)mask, THREAD_AFFINITY_POLICY_COUNT)
+
+#elif (defined(__CYGWIN__) || defined(__MINGW__) || defined(_MSC_VER))
+#include <windows.h>
+typedef DWORD_PTR cpu_set_t;
+
+#define CPU_SET(cpu_id, new_mask) (*(new_mask)) = (cpu_id + 1)
+#define CPU_ZERO(new_mask) (*(new_mask)) = 0
+#define SET_AFFINITY(pid, size, mask) \
+         SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)mask)
+#define GET_AFFINITY(pid, size, mask) DWORD_PTR s_mask; \
+         GetProcessAffinityMask(GetCurrentProcess(), mask, &s_mask)
+
 #else
 #include <sched.h>
 #define SET_AFFINITY(pid, size, mask) sched_setaffinity(0, size, mask)
@@ -95,7 +107,7 @@ public:
 };
 
 enum Flag {
-  TrackBuiltins         = 0x1,
+  NoTrackBuiltins       = 0x1,
   TrackCPU              = 0x2,
   TrackMemory           = 0x4,
   TrackVtsc             = 0x8,
@@ -103,9 +115,17 @@ enum Flag {
   MeasureXhprofDisable  = 0x20,
   Unused                = 0x40,
   TrackMalloc           = 0x80,
+
   // Allows profiling of multiple threads at the same time with TraceProfiler.
   // Requires a lot of memory.
   IHaveInfiniteMemory   = 0x100,
+
+  // A very slow profiler of function arguments and results
+  // to look for memoization opportunities.
+  Memo                  = 0x200,
+
+  // A hot profiler supplied by a call to HotProfiler::setExternalProfiler.
+  External              = 0x400,
 };
 
 /**
@@ -138,16 +158,18 @@ public:
   /**
    * Start a new frame with the specified symbol.
    */
-  virtual void beginFrame(const char *symbol) __attribute__ ((noinline)) ;
+  virtual void beginFrame(const char *symbol) __attribute__ ((__noinline__)) ;
 
   /**
    * End top of the stack.
    */
   virtual void endFrame(const TypedValue *retval,
                         const char *symbol,
-                        bool endMain = false) __attribute__ ((noinline)) ;
+                        bool endMain = false) __attribute__ ((__noinline__)) ;
 
   virtual void endAllFrames();
+
+  virtual bool shouldSkipBuiltins() const { return false; }
 
   template<class phpret, class Name, class Counts>
   static void returnVals(phpret& ret, const Name& name, const Counts& counts,
@@ -226,21 +248,21 @@ public:
 };
 
 ///////////////////////////////////////////////////////////////////////////////
-struct ProfilerFactory final : RequestEventHandler {
-  enum Level {
-    Simple       = 1,
-    Hierarchical = 2,
-    Memory       = 3,
-    Trace        = 4,
-    Memo         = 5,
-    XDebug       = 6,
-    Sample       = 620002, // Rockfort's zip code
-  };
+enum class ProfilerKind {
+  Hierarchical = 1,
+  Memory       = 2,
+  Trace        = 3,
+  Memo         = 4,
+  XDebug       = 5,
+  External     = 6,
+  Sample       = 620002, // Rockfort's zip code
+};
 
+struct ProfilerFactory final : RequestEventHandler {
   static bool EnableNetworkProfiler;
 
 public:
-  ProfilerFactory() : m_profiler(nullptr) {
+  ProfilerFactory() : m_profiler(nullptr), m_external_profiler(nullptr) {
   }
 
   ~ProfilerFactory() {
@@ -262,7 +284,7 @@ public:
    * or false on failure. If beginFrame is true, Profiler::beginFrame is called
    * with "main()" as the symbol name.
    */
-  bool start(Level level, long flags, bool beginFrame = true);
+  bool start(ProfilerKind kind, long flags, bool beginFrame = true);
 
   /**
    * Will stop profiling if currently profiling, regardless of how it was
@@ -278,8 +300,20 @@ public:
     m_artificialFrameNames.append(name);
   }
 
+  /**
+   * Registers a Profiler to use when ProfilerKind::External is used.
+   */
+  void setExternalProfiler(Profiler *p) {
+    delete(m_external_profiler);
+    m_external_profiler = p;
+  }
+  Profiler *getExternalProfiler() {
+    return m_external_profiler;
+  }
+
 private:
   Profiler *m_profiler;
+  Profiler *m_external_profiler;
   Array m_artificialFrameNames;
 };
 

@@ -81,7 +81,7 @@ include_directories(${LIBMEMCACHED_INCLUDE_DIR})
 
 # pcre checks
 find_package(PCRE REQUIRED)
-include_directories(${PCRE_INCLUDE_DIRS})
+include_directories(${PCRE_INCLUDE_DIR})
 
 # libevent checks
 find_package(LibEvent REQUIRED)
@@ -185,6 +185,10 @@ endif (ICU_FOUND)
 # jemalloc/tmalloc and profiler
 if (USE_GOOGLE_HEAP_PROFILER OR USE_GOOGLE_CPU_PROFILER)
   FIND_LIBRARY(GOOGLE_PROFILER_LIB profiler)
+  FIND_PATH(GOOGLE_PROFILER_INCLUDE_DIR NAMES google/profiler.h)
+  if (GOOGLE_PROFILER_INCLUDE_DIR)
+    include_directories(${GOOGLE_PROFILER_INCLUDE_DIR})
+  endif()
   if (GOOGLE_PROFILER_LIB)
     message(STATUS "Found Google profiler: ${GOOGLE_PROFILER_LIB}")
     if (USE_GOOGLE_CPU_PROFILER)
@@ -332,6 +336,13 @@ if (PAM_INCLUDE_PATH)
   include_directories(${PAM_INCLUDE_PATH})
 endif()
 
+# LLVM
+find_package(LLVM)
+if (LIBLLVM_INCLUDE_DIR)
+  include_directories(LIBLLVM_INCLUDE_DIR)
+  add_definitions("-DUSE_LLVM")
+endif()
+
 FIND_LIBRARY(CRYPT_LIB NAMES xcrypt crypt crypto)
 if (LINUX OR FREEBSD)
   FIND_LIBRARY (RT_LIB rt)
@@ -350,7 +361,7 @@ if (LINUX OR APPLE)
   FIND_LIBRARY (RESOLV_LIB resolv)
 endif()
 
-FIND_LIBRARY (BFD_LIB bfd)
+FIND_LIBRARY (BFD_LIB libbfd.a)
 FIND_LIBRARY (LIBIBERTY_LIB iberty)
 
 if (NOT BFD_LIB)
@@ -467,11 +478,11 @@ macro(hphp_link target)
   if (LIBUODBC_LIBRARIES)
     target_link_libraries(${target} ${LIBUODBC_LIBRARIES})
   endif()
- 
+
   target_link_libraries(${target} ${LDAP_LIBRARIES})
   target_link_libraries(${target} ${LBER_LIBRARIES})
 
-  target_link_libraries(${target} ${LIBMEMCACHED_LIBRARY})
+  target_link_libraries(${target} ${LIBMEMCACHED_LIBRARIES})
 
   target_link_libraries(${target} ${CRYPT_LIB})
 
@@ -484,10 +495,10 @@ macro(hphp_link target)
   else()
     target_link_libraries(${target} sqlite3)
   endif()
-  
+
   if (DOUBLE_CONVERSION_LIBRARY)
     target_link_libraries(${target} ${DOUBLE_CONVERSION_LIBRARY})
-  else() 
+  else()
     target_link_libraries(${target} double-conversion)
   endif()
 
@@ -496,11 +507,17 @@ macro(hphp_link target)
   else()
     target_link_libraries(${target} lz4)
   endif()
-  
+
   if (LIBZIP_LIBRARY)
     target_link_libraries(${target} ${LIBZIP_LIBRARY})
   else()
     target_link_libraries(${target} zip_static)
+  endif()
+
+  if (PCRE_LIBRARY)
+    target_link_libraries(${target} ${PCRE_LIBRARY})
+  else()
+    target_link_libraries(${target} pcre)
   endif()
 
   target_link_libraries(${target} fastlz)
@@ -522,4 +539,8 @@ macro(hphp_link target)
 
   target_link_libraries(${target} ${LIBDWARF_LIBRARIES})
   target_link_libraries(${target} ${LIBELF_LIBRARIES})
+
+  if (LIBLLVM_LIBRARY)
+    target_link_libraries(${target} ${LIBLLVM_LIBRARY})
+  endif()
 endmacro()

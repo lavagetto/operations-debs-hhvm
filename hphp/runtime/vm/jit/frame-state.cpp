@@ -24,8 +24,7 @@
 
 TRACE_SET_MOD(hhir);
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 
 using Trace::Indent;
 
@@ -38,16 +37,9 @@ FrameState::FrameState(IRUnit& unit, BCMarker marker)
 FrameState::FrameState(IRUnit& unit, Offset initialSpOffset, const Func* func)
   : m_unit(unit)
   , m_curFunc(func)
-  , m_spValue(nullptr)
-  , m_fpValue(nullptr)
   , m_spOffset(initialSpOffset)
-  , m_thisAvailable(false)
-  , m_frameSpansCall(false)
-  , m_stackDeficit(0)
-  , m_evalStack()
   , m_locals(func ? func->numLocals() : 0)
-  , m_enableCse(false)
-  , m_snapshots()
+  , m_visited(unit.numBlocks())
 {
 }
 
@@ -149,12 +141,6 @@ void FrameState::update(const IRInstruction* inst) {
     break;
   }
 
-  case AssertLoc:
-  case GuardLoc:
-  case CheckLoc:
-    m_fpValue = inst->dst();
-    break;
-
   case LdThis:
     m_thisAvailable = true;
     break;
@@ -225,12 +211,14 @@ void FrameState::getLocalEffects(const IRInstruction* inst,
       auto const type = inst->typeParam().relaxToGuardable();
       auto id = inst->extra<LdGbl>()->locId;
       hook.setLocalType(id, type);
-      hook.setLocalTypeSource(id, inst->dst());
+      hook.setLocalTypeSource(id, TypeSource::makeValue(inst->dst()));
       break;
     }
     case StGbl: {
       auto const type = inst->src(1)->type().relaxToGuardable();
-      hook.setLocalType(inst->extra<StGbl>()->locId, type);
+      auto id = inst->extra<StGbl>()->locId;
+      hook.setLocalType(id, type);
+      hook.setLocalTypeSource(id, TypeSource::makeValue(inst->src(1)));
       break;
     }
 
@@ -240,10 +228,11 @@ void FrameState::getLocalEffects(const IRInstruction* inst,
 
     case AssertLoc:
     case GuardLoc:
-    case CheckLoc:
-      hook.refineLocalType(inst->extra<LocalId>()->locId, inst->typeParam(),
-                           inst->dst());
+    case CheckLoc: {
+      auto id = inst->extra<LocalId>()->locId;
+      hook.refineLocalType(id, inst->typeParam(), TypeSource::makeGuard(inst));
       break;
+    }
 
     case TrackLoc:
       hook.setLocalValue(inst->extra<LocalId>()->locId, inst->src(0));
@@ -421,7 +410,12 @@ void FrameState::dropLocalRefsInnerTypes(LocalStateHook& hook) const {
 }
 
 ///// Methods for managing and merge block state /////
-void FrameState::startBlock(Block* block) {
+
+bool FrameState::hasStateFor(Block* block) const {
+  return m_snapshots.count(block);
+}
+
+void FrameState::startBlock(Block* block, BCMarker marker) {
   auto const it = m_snapshots.find(block);
   DEBUG_ONLY auto const predsAllowed =
     it != m_snapshots.end() || block->isEntry() || RuntimeOption::EvalJitLoops;
@@ -433,6 +427,20 @@ void FrameState::startBlock(Block* block) {
     m_inlineSavedStates = it->second.inlineSavedStates;
     m_snapshots.erase(it);
   }
+
+  // Reset state if the block has an unprocessed predecessor.
+  for (auto const& edge : block->preds()) {
+    auto const pred = edge.inst()->block();
+    if (!isVisited(pred)) {
+      Indent _;
+      ITRACE(4, "B{} has unprocessed predecessor B{}, resetting state\n",
+             block->id(), pred->id());
+      resetCurrentState(marker);
+      break;
+    }
+  }
+
+  markVisited(block);
 }
 
 void FrameState::finishBlock(Block* block) {
@@ -528,10 +536,11 @@ void FrameState::merge(Snapshot& state) {
     // because spOffset matched.
     state.spValue = nullptr;
   }
-  if (state.fpValue != m_fpValue) {
-    state.fpValue = IRInstruction::frameCommonRoot(state.fpValue, m_fpValue);
-    assert(state.fpValue);
-  }
+
+  // The only thing that can change the FP is inlining, but we can't have one
+  // of the predecessors in an inlined callee while the other isn't.
+  always_assert(state.fpValue == m_fpValue);
+
   // this is available iff it's available in both states
   state.thisAvailable &= m_thisAvailable;
 
@@ -553,8 +562,12 @@ void FrameState::merge(Snapshot& state) {
         local.value = nullptr;
       }
     }
-    if (local.typeSource != m_locals[i].typeSource) local.typeSource = nullptr;
-    if (local.value && !local.typeSource) local.typeSource = local.value;
+    if (local.typeSrc != m_locals[i].typeSrc) {
+      local.typeSrc = TypeSource{};
+    }
+    if (local.value != nullptr && local.typeSrc.isNone()) {
+      local.typeSrc = TypeSource::makeValue(local.value);
+    }
 
     local.type = Type::unionOf(local.type, m_locals[i].type);
   }
@@ -656,16 +669,30 @@ void FrameState::clear() {
   while (inlineDepth()) {
     trackInlineReturn();
   }
-
+  clearCurrentState();
   clearCse();
-  clearLocals(*this);
-  m_frameSpansCall = false;
-  m_spValue = m_fpValue = nullptr;
-  m_spOffset = 0;
-  m_thisAvailable = false;
-  m_marker = BCMarker();
   m_snapshots.clear();
+  m_visited.clear();
   assert(m_inlineSavedStates.empty());
+}
+
+void FrameState::clearCurrentState() {
+  m_spValue        = nullptr;
+  m_fpValue        = nullptr;
+  m_spOffset       = 0;
+  m_marker         = BCMarker();
+  m_thisAvailable  = false;
+  m_frameSpansCall = false;
+  m_stackDeficit   = 0;
+  m_evalStack      = EvalStack();
+  clearLocals(*this);
+}
+
+void FrameState::resetCurrentState(BCMarker marker) {
+  clearCurrentState();
+  m_marker   = marker;
+  m_spOffset = marker.spOff();
+  m_curFunc  = marker.func();
 }
 
 SSATmp* FrameState::localValue(uint32_t id) const {
@@ -673,13 +700,9 @@ SSATmp* FrameState::localValue(uint32_t id) const {
   return m_locals[id].value;
 }
 
-SSATmp* FrameState::localTypeSource(uint32_t id) const {
+TypeSource FrameState::localTypeSource(uint32_t id) const {
   always_assert(id < m_locals.size());
-  auto const& local = m_locals[id];
-
-  always_assert(!local.value || local.value == local.typeSource ||
-                local.typeSource->isA(Type::FramePtr));
-  return local.typeSource;
+  return m_locals[id].typeSrc;
 }
 
 Type FrameState::localType(uint32_t id) const {
@@ -691,10 +714,10 @@ void FrameState::setLocalValue(uint32_t id, SSATmp* value) {
   always_assert(id < m_locals.size());
   m_locals[id].value = value;
   m_locals[id].type = value ? value->type() : Type::Gen;
-  m_locals[id].typeSource = value;
+  m_locals[id].typeSrc = value ? TypeSource::makeValue(value) : TypeSource{};
 }
 
-void FrameState::refineLocalType(uint32_t id, Type type, SSATmp* typeSource) {
+void FrameState::refineLocalType(uint32_t id, Type type, TypeSource typeSrc) {
   always_assert(id < m_locals.size());
   auto& local = m_locals[id];
   Type newType = refineType(local.type, type);
@@ -704,19 +727,19 @@ void FrameState::refineLocalType(uint32_t id, Type type, SSATmp* typeSource) {
                      "Bad new type for local {}: {} & {} = {}",
                      id, local.type, type, newType);
   local.type = newType;
-  local.typeSource = typeSource;
+  local.typeSrc = typeSrc;
 }
 
 void FrameState::setLocalType(uint32_t id, Type type) {
   always_assert(id < m_locals.size());
   m_locals[id].value = nullptr;
   m_locals[id].type = type;
-  m_locals[id].typeSource = nullptr;
+  m_locals[id].typeSrc = TypeSource{};
 }
 
-void FrameState::setLocalTypeSource(uint32_t id, SSATmp* typeSrc) {
+void FrameState::setLocalTypeSource(uint32_t id, TypeSource typeSrc) {
   always_assert(id < m_locals.size());
-  m_locals[id].typeSource = typeSrc;
+  m_locals[id].typeSrc = typeSrc;
 }
 
 /*
@@ -740,7 +763,7 @@ void FrameState::refineLocalValue(uint32_t id, unsigned inlineIdx,
   auto& local = locs[id];
   local.value = newVal;
   local.type = newVal->type();
-  local.typeSource = newVal;
+  local.typeSrc = TypeSource::makeValue(newVal);
 }
 
 void FrameState::killLocalForCall(uint32_t id, unsigned inlineIdx,
@@ -756,13 +779,26 @@ void FrameState::updateLocalRefValue(uint32_t id, unsigned inlineIdx,
   assert(local.value == oldRef);
   local.value = newRef;
   local.type  = newRef->type();
-  local.typeSource = newRef;
+  local.typeSrc = TypeSource::makeValue(newRef);
 }
 
 void FrameState::dropLocalInnerType(uint32_t id, unsigned inlineIdx) {
   auto& local = locals(inlineIdx)[id];
   assert(local.type.isBoxed());
   local.type = Type::BoxedInitCell;
+}
+
+void FrameState::markVisited(const Block* b) {
+  // The number of blocks in the unit can change over time.
+  if (b->id() >= m_visited.size()) {
+    m_visited.resize(b->id() + 1);
+  }
+
+  m_visited.set(b->id());
+}
+
+bool FrameState::isVisited(const Block* b) const {
+  return b->id() < m_visited.size() && m_visited.test(b->id());
 }
 
 std::string show(const FrameState& state) {

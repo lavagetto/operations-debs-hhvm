@@ -59,7 +59,7 @@ RefData* lookupStaticFromClosure(ObjectData* closure,
   return val->m_data.pref;
 }
 
-namespace JIT {
+namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
@@ -155,7 +155,7 @@ TypedValue incDecElem(TypedValue* base, TypedValue key,
 }
 
 void bindNewElemIR(TypedValue* base, RefData* val, MInstrState* mis) {
-  base = HPHP::NewElem(mis->tvScratch, mis->tvRef, base);
+  base = HPHP::NewElem<true>(mis->tvScratch, mis->tvRef, base);
   if (!(base == &mis->tvScratch && base->m_type == KindOfUninit)) {
     tvBindRef(val, base);
   }
@@ -395,9 +395,13 @@ ALWAYS_INLINE
 static bool ak_exist_string_impl(ArrayData* arr, StringData* key) {
   int64_t n;
   if (key->isStrictlyInteger(n)) {
-    if (UNLIKELY(arr->isIntMapArray())) {
-      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                            ArrayData::kIntMapKind);
+    if (UNLIKELY(arr->isVPackedArrayOrIntMapArray())) {
+      if (arr->isVPackedArray()) {
+        PackedArray::warnUsage(PackedArray::Reason::kNumericString);
+      } else {
+        MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                              ArrayData::kIntMapKind);
+      }
     }
     return arr->exists(n);
   }
@@ -454,9 +458,13 @@ TypedValue arrayIdxI(ArrayData* a, int64_t key, TypedValue def) {
 }
 
 TypedValue arrayIdxIc(ArrayData* a, int64_t key, TypedValue def) {
-  if (UNLIKELY(a->isIntMapArray())) {
-    MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                          ArrayData::kIntMapKind);
+  if (UNLIKELY(a->isVPackedArrayOrIntMapArray())) {
+    if (a->isVPackedArray()) {
+      PackedArray::warnUsage(PackedArray::Reason::kNumericString);
+    } else {
+      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                            ArrayData::kIntMapKind);
+    }
   }
   return arrayIdxI(a, key, def);
 }
@@ -686,17 +694,17 @@ Cell lookupCnsUHelper(const TypedValue* tv,
                    fallback->data(), fallback->data());
       c1.m_data.pstr = const_cast<StringData*>(fallback);
       c1.m_type = KindOfStaticString;
+      return c1;
     }
-  } else {
-    c1.m_type = cns->m_type;
-    c1.m_data = cns->m_data;
   }
+  c1.m_type = cns->m_type;
+  c1.m_data = cns->m_data;
   return c1;
 }
 
 //////////////////////////////////////////////////////////////////////
 
-void checkFrame(ActRec* fp, Cell* sp, bool checkLocals) {
+void checkFrame(ActRec* fp, Cell* sp, bool fullCheck, Offset bcOff) {
   const Func* func = fp->m_func;
   func->validate();
   if (func->cls()) {
@@ -708,26 +716,34 @@ void checkFrame(ActRec* fp, Cell* sp, bool checkLocals) {
   // TODO: validate this pointer from actrec
   int numLocals = func->numLocals();
   assert(sp <= (Cell*)fp - func->numSlotsInFrame() || fp->resumed());
-  if (checkLocals) {
-    int numParams = func->numParams();
-    for (int i = 0; i < numLocals; i++) {
-      if (i >= numParams && fp->resumed() && i < func->numNamedLocals()) {
-        continue;
-      }
-      assert(tvIsPlausible(*frame_local(fp, i)));
+
+  if (!fullCheck) return;
+
+  int numParams = func->numParams();
+  for (int i = 0; i < numLocals; i++) {
+    if (i >= numParams && fp->resumed() && i < func->numNamedLocals()) {
+      continue;
     }
+    assert(tvIsPlausible(*frame_local(fp, i)));
   }
-  // We unfortunately can't do the same kind of check for the stack
-  // without knowing about FPI regions, because it may contain
-  // ActRecs.
+
+  visitStackElems(
+    fp, sp, bcOff,
+    [](const ActRec* ar) {
+      ar->func()->validate();
+    },
+    [](const TypedValue* tv) {
+      assert(tv->m_type == KindOfClass || tvIsPlausible(*tv));
+    }
+  );
 }
 
-void traceCallback(ActRec* fp, Cell* sp, int64_t pcOff, void* rip) {
-  if (HPHP::Trace::moduleEnabled(HPHP::Trace::hhirTracelets)) {
+void traceCallback(ActRec* fp, Cell* sp, Offset pcOff, void* rip) {
+  if (Trace::moduleEnabled(Trace::hhirTracelets)) {
     FTRACE(0, "{} {} {} {} {}\n",
            fp->m_func->fullName()->data(), pcOff, rip, fp, sp);
   }
-  checkFrame(fp, sp, /*checkLocals*/true);
+  checkFrame(fp, sp, /*fullCheck*/true, pcOff);
 }
 
 enum class OnFail { Warn, Fatal };
@@ -1098,19 +1114,34 @@ void shuffleExtraArgsVariadicAndVV(ActRec* ar) {
 #undef SHUFFLE_EXTRA_ARGS_PRELUDE
 
 void raiseMissingArgument(const Func* func, int got) {
-  const auto expected = func->numNonVariadicParams();
+  const auto total = func->numNonVariadicParams();
   const auto variadic = func->hasVariadicCaptureParam();
+  const Func::ParamInfoVec& params = func->params();
+  int expected = 0;
+  // We subtract the number of parameters with default value at the end
+  for (size_t i = total; i--; ) {
+    if (!params[i].hasDefaultValue()) {
+      expected = i + 1;
+      break;
+    }
+  }
+  bool lessNeeded = (variadic || expected < total);
   if (expected == 1) {
     raise_warning(Strings::MISSING_ARGUMENT, func->name()->data(),
-                  variadic ? "at least" : "exactly", got);
+                  lessNeeded ? "at least" : "exactly", got);
   } else {
     raise_warning(Strings::MISSING_ARGUMENTS, func->name()->data(),
-                  variadic ? "at least" : "exactly", expected, got);
+                  lessNeeded ? "at least" : "exactly", expected, got);
   }
 }
 
 RDS::Handle lookupClsRDSHandle(const StringData* name) {
   return NamedEntity::get(name)->getClassHandle();
+}
+
+void registerLiveObj(ObjectData* obj) {
+  assert(RuntimeOption::EnableObjDestructCall && obj->getVMClass()->getDtor());
+  g_context->m_liveBCObjs.insert(obj);
 }
 
 //////////////////////////////////////////////////////////////////////

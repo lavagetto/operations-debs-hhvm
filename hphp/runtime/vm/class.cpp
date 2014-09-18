@@ -123,7 +123,7 @@ void Class::PropInitVec::push_back(const TypedValue& v) {
 ///////////////////////////////////////////////////////////////////////////////
 // Class.
 
-static_assert(sizeof(Class) == 408, "Change this only on purpose");
+static_assert(sizeof(Class) == 416, "Change this only on purpose");
 
 namespace {
 
@@ -543,6 +543,9 @@ void Class::initSPropHandles() const {
   Class* parent = this->parent();
   if (parent) {
     parent->initSPropHandles();
+    if (!RDS::isPersistentHandle(parent->sPropInitHandle())) {
+      allPersistentHandles = false;
+    }
   }
 
   // Bind all the static prop handles.
@@ -554,10 +557,8 @@ void Class::initSPropHandles() const {
 
       if (sProp.m_class == this) {
         if (usePersistentHandles && (sProp.m_attrs & AttrPersistent)) {
-          RDS::Link<TypedValue> tmp{RDS::kInvalidHandle};
-          tmp.bind(RDS::Mode::Persistent);
-          *tmp = sProp.m_val;
-          propHandle = tmp;
+          propHandle.bind(RDS::Mode::Persistent);
+          *propHandle = sProp.m_val;
         } else {
           propHandle.bind(RDS::Mode::Local);
         }
@@ -569,6 +570,15 @@ void Class::initSPropHandles() const {
         auto realSlot = sProp.m_class->lookupSProp(sProp.m_name);
         propHandle = sProp.m_class->m_sPropCache[realSlot];
       }
+    } else if (propHandle.isPersistent()) {
+      /*
+       * Avoid a weird race: two threads come through at once, the first
+       * gets as far as binding propHandle, but then sleeps. Meanwhile the
+       * second sees that its been bound, finishes up, and then tries to
+       * read the property, but sees uninit-null for the value (and asserts
+       * in a dbg build)
+       */
+      *propHandle = m_staticProperties[slot].m_val;
     }
     if (!propHandle.isPersistent()) {
       allPersistentHandles = false;
@@ -577,6 +587,9 @@ void Class::initSPropHandles() const {
 
   // Bind the init handle; this indicates that all handles are bound.
   if (allPersistentHandles) {
+    // We must make sure the value stored at the handle is correct before
+    // setting m_sPropCacheInit in case another thread tries to read it at just
+    // the wrong time.
     RDS::Link<bool> tmp{RDS::kInvalidHandle};
     tmp.bind(RDS::Mode::Persistent);
     *tmp = true;
@@ -1577,6 +1590,7 @@ Class::Class(PreClass* preClass, Class* parent,
   setClassVec();
   setRequirements();
   setNativeDataInfo();
+  setEnumType();
 }
 
 void Class::methodOverrideCheck(const Func* parentMethod, const Func* method) {
@@ -2559,6 +2573,18 @@ void Class::setRequirements() {
 
   m_requirements.create(reqBuilder);
   checkRequirementConstraints();
+}
+
+void Class::setEnumType() {
+  if (attrs() & AttrEnum) {
+    m_enumBaseTy = m_preClass->enumBaseTy().underlyingDataTypeResolved();
+    // Make sure we've loaded a valid underlying type
+    if (!IS_INT_TYPE(m_enumBaseTy) && !IS_STRING_TYPE(m_enumBaseTy) &&
+        m_enumBaseTy != KindOfAny) {
+      raise_error("Invalid base type for enum %s",
+                  m_preClass->name()->data());
+    }
+  }
 }
 
 void Class::setNativeDataInfo() {

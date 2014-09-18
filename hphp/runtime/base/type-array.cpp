@@ -15,22 +15,30 @@
 */
 
 #include "hphp/runtime/base/type-array.h"
-#include "hphp/runtime/base/base-includes.h"
-#include "hphp/runtime/base/complex-types.h"
+
 #include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/comparisons.h"
-#include "hphp/util/exception.h"
 #include "hphp/runtime/base/apc-local-array.h"
+#include "hphp/runtime/base/array-util.h"
+#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/memory-manager.h"
+#include "hphp/runtime/base/mixed-array.h"
+#include "hphp/runtime/base/mixed-array-defs.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
-#include "hphp/runtime/base/zend-string.h"
-#include "hphp/runtime/base/zend-qsort.h"
 #include "hphp/runtime/base/zend-printf.h"
-#include "hphp/runtime/base/array-util.h"
-#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/zend-qsort.h"
+#include "hphp/runtime/base/zend-string.h"
+
+#include "hphp/parser/hphp.tab.hpp"
+
+#include "hphp/util/exception.h"
+
 #include <unicode/coll.h> // icu
 #include <vector>
-#include "hphp/parser/hphp.tab.hpp"
 
 namespace HPHP {
 
@@ -446,12 +454,19 @@ const Variant& Array::rvalAtRef(const String& key, ACCESSPARAMS_IMPL) const {
     if (key.isNull()) return m_px->get(staticEmptyString(), error);
     int64_t n;
     if (!key.get()->isStrictlyInteger(n)) {
-      if (UNLIKELY(m_px->isIntMapArray())) {
-        MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                              ArrayData::kIntMapKind);
+      if (UNLIKELY(m_px->isVPackedArrayOrIntMapArray())) {
+        if (m_px->isVPackedArray()) {
+          PackedArray::warnUsage(PackedArray::Reason::kGetStr);
+        } else {
+          MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                                ArrayData::kIntMapKind);
+        }
       }
       return m_px->get(key, error);
     } else {
+      if (UNLIKELY(m_px->isVPackedArray())) {
+        PackedArray::warnUsage(PackedArray::Reason::kGetStr);
+      }
       return m_px->get(n, error);
     }
   }
@@ -481,12 +496,20 @@ const Variant& Array::rvalAtRef(const Variant& key, ACCESSPARAMS_IMPL) const {
       int64_t n;
       if (!(flags & AccessFlags::Key) &&
           key.asTypedValue()->m_data.pstr->isStrictlyInteger(n)) {
-        if (UNLIKELY(m_px->isIntMapArray())) {
-          MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                                ArrayData::kIntMapKind);
+        if (UNLIKELY(m_px->isVPackedArrayOrIntMapArray())) {
+          if (m_px->isVPackedArray()) {
+            PackedArray::warnUsage(PackedArray::Reason::kGetStr);
+          } else {
+            MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                                  ArrayData::kIntMapKind);
+          }
         }
+
         return m_px->get(n, flags & AccessFlags::Error);
       }
+    }
+    if (UNLIKELY(m_px->isVPackedArray())) {
+      PackedArray::warnUsage(PackedArray::Reason::kGetStr);
     }
     return m_px->get(key.asCStrRef(), flags & AccessFlags::Error);
   case KindOfArray:
@@ -515,6 +538,16 @@ Variant &Array::lvalAt() {
   Variant *ret = nullptr;
   ArrayData *arr = m_px;
   ArrayData *escalated = arr->lvalNew(ret, arr->hasMultipleRefs());
+  if (escalated != arr) ArrayBase::operator=(escalated);
+  assert(ret);
+  return *ret;
+}
+
+Variant &Array::lvalAtRef() {
+  if (!m_px) ArrayBase::operator=(ArrayData::Create());
+  Variant *ret = nullptr;
+  ArrayData *arr = m_px;
+  ArrayData *escalated = arr->lvalNewRef(ret, arr->hasMultipleRefs());
   if (escalated != arr) ArrayBase::operator=(escalated);
   assert(ret);
   return *ret;
@@ -754,8 +787,17 @@ void Array::unserialize(VariableUnserializer *uns) {
   if (size == 0) {
     operator=(Create());
   } else {
-    // Pre-allocate an ArrayData of the given size, to avoid escalation in
-    // the middle, which breaks references.
+    auto const cmret = computeCapAndMask(size);
+    auto const allocsz = computeAllocBytes(cmret.first, cmret.second);
+
+    // For large arrays, do a naive pre-check for OOM.
+    if (UNLIKELY(allocsz > RuntimeOption::ArrUnserializeCheckSize &&
+                 MM().preAllocOOM(allocsz))) {
+      check_request_surprise_unlikely();
+    }
+
+    // Pre-allocate an ArrayData of the given size, to avoid escalation in the
+    // middle, which breaks references.
     operator=(ArrayInit(size, ArrayInit::Mixed{}).toArray());
     for (int64_t i = 0; i < size; i++) {
       Variant key(uns->unserializeKey());
@@ -769,6 +811,8 @@ void Array::unserialize(VariableUnserializer *uns) {
       value.unserialize(uns);
     }
   }
+
+  check_request_surprise_unlikely();
 
   sep = uns->readChar();
   if (sep != '}') {
@@ -905,6 +949,10 @@ bool Array::MultiSort(std::vector<SortData> &data, bool renumber) {
   for (unsigned int k = 0; k < data.size(); k++) {
     SortData &opaque = data[k];
     const Array& arr = *opaque.array;
+    if (renumber && (opaque.original->getArrayData()->isIntMapArray())) {
+      MixedArray::downgradeAndWarn(opaque.original->getArrayData(),
+                                   MixedArray::Reason::kSort);
+    }
 
     Array sorted;
     for (int i = 0; i < count; i++) {

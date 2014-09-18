@@ -47,8 +47,7 @@
 // Include last to localize effects to this file
 #include "hphp/util/assert-throw.h"
 
-namespace HPHP {
-namespace JIT {
+namespace HPHP { namespace jit {
 
 using namespace reg;
 using namespace Trace;
@@ -64,32 +63,29 @@ TRACE_SET_MOD(hhir);
 
 #define HHIR_UNIMPLEMENTED_OP(op)                       \
   do {                                                  \
-    throw JIT::FailedIRGen(__FILE__, __LINE__, op);     \
+    throw jit::FailedIRGen(__FILE__, __LINE__, op);     \
   } while (0)
 
 
 #define HHIR_UNIMPLEMENTED(op)                          \
   do {                                                  \
-    throw JIT::FailedIRGen(__FILE__, __LINE__, #op);    \
+    throw jit::FailedIRGen(__FILE__, __LINE__, #op);    \
   } while (0)
 
 #define HHIR_UNIMPLEMENTED_WHEN(expr, op)               \
   do {                                                  \
     if (expr) {                                         \
-      throw JIT::FailedIRGen(__FILE__, __LINE__, #op);  \
+      throw jit::FailedIRGen(__FILE__, __LINE__, #op);  \
     }                                                   \
   } while (0)
 
 static JmpFlags instrJmpFlags(const NormalizedInstruction& ni) {
   JmpFlags flags = JmpFlagNone;
-  if (ni.breaksTracelet) {
-    flags = flags | JmpFlagBreakTracelet;
+  if (ni.endsRegion) {
+    flags = flags | JmpFlagEndsRegion;
   }
   if (ni.nextIsMerge) {
     flags = flags | JmpFlagNextIsMerge;
-  }
-  if (ni.includeBothPaths) {
-    flags = flags | JmpFlagBothPaths;
   }
   return flags;
 }
@@ -179,26 +175,27 @@ IRTranslator::translateBranchOp(const NormalizedInstruction& i) {
 
   Offset takenOffset    = i.offset() + i.imm[0].u_BA;
   Offset fallthruOffset = i.offset() + instrLen((Op*)(i.pc()));
-  assert(!i.includeBothPaths || !i.breaksTracelet);
 
   auto jmpFlags = instrJmpFlags(i);
-  if (i.breaksTracelet || i.nextOffset == fallthruOffset) {
+
+  if (i.nextOffset == takenOffset) {
+    // invert the branch
     if (op == OpJmpZ) {
-      HHIR_EMIT(JmpZ,  takenOffset, jmpFlags);
+      HHIR_EMIT(JmpNZ, fallthruOffset, jmpFlags);
     } else {
-      HHIR_EMIT(JmpNZ, takenOffset, jmpFlags);
+      HHIR_EMIT(JmpZ,  fallthruOffset, jmpFlags);
+    }
+    if (i.nextOffset != takenOffset) {
+      always_assert(RuntimeOption::EvalJitPGORegionSelector == "wholecfg");
+      HHIR_EMIT(Jmp, takenOffset, jmpFlags);
     }
     return;
   }
-  // invert the branch
+
   if (op == OpJmpZ) {
-    HHIR_EMIT(JmpNZ, fallthruOffset, jmpFlags);
+    HHIR_EMIT(JmpZ,  takenOffset, jmpFlags);
   } else {
-    HHIR_EMIT(JmpZ,  fallthruOffset, jmpFlags);
-  }
-  if (i.nextOffset != takenOffset) {
-    always_assert(RuntimeOption::EvalJitPGORegionSelector == "wholecfg");
-    HHIR_EMIT(Jmp, takenOffset, jmpFlags);
+    HHIR_EMIT(JmpNZ, takenOffset, jmpFlags);
   }
 }
 
@@ -472,7 +469,7 @@ IRTranslator::translateFCallBuiltin(const NormalizedInstruction& i) {
   Id funcId = i.imm[2].u_SA;
 
   HHIR_EMIT(FCallBuiltin, numArgs, numNonDefault, funcId,
-            JIT::callDestroysLocals(i, m_hhbcTrans.curFunc()));
+            jit::callDestroysLocals(i, m_hhbcTrans.curFunc()));
 }
 
 void
@@ -485,7 +482,7 @@ IRTranslator::translateFCall(const NormalizedInstruction& i) {
     srcFunc->unit()->offsetOf(after - srcFunc->base());
 
   HHIR_EMIT(FCall, numArgs, returnBcOffset, i.funcd,
-            JIT::callDestroysLocals(i, m_hhbcTrans.curFunc()));
+            jit::callDestroysLocals(i, m_hhbcTrans.curFunc()));
 }
 
 void IRTranslator::translateFCallD(const NormalizedInstruction& i) {
@@ -499,7 +496,7 @@ IRTranslator::translateFCallArray(const NormalizedInstruction& i) {
   const Offset after = next.offset();
 
   HHIR_EMIT(FCallArray, pcOffset, after,
-            JIT::callDestroysLocals(i, m_hhbcTrans.curFunc()));
+            jit::callDestroysLocals(i, m_hhbcTrans.curFunc()));
 }
 
 void
@@ -529,7 +526,7 @@ static Offset getBranchTarget(const NormalizedInstruction& i,
   Offset targetOffset = i.offset() + i.imm[1].u_BA;
   invertCond = false;
 
-  if (!i.breaksTracelet && i.nextOffset == targetOffset) {
+  if (!i.endsRegion && i.nextOffset == targetOffset) {
     invertCond = true;
     Offset fallthruOffset = i.offset() + instrLen((Op*)i.pc());
     targetOffset = fallthruOffset;
@@ -689,8 +686,8 @@ IRTranslator::translateWIterNextK(const NormalizedInstruction& i) {
 void
 IRTranslator::translateIterBreak(const NormalizedInstruction& i) {
 
-  assert(i.breaksTracelet);
-  HHIR_EMIT(IterBreak, i.immVec, i.offset() + i.imm[1].u_BA, i.breaksTracelet);
+  assert(i.endsRegion);
+  HHIR_EMIT(IterBreak, i.immVec, i.offset() + i.imm[1].u_BA, i.endsRegion);
 }
 
 void
@@ -913,7 +910,7 @@ static Type flavorToType(FlavorDesc f) {
 void IRTranslator::translateInstr(const NormalizedInstruction& ni) {
   auto& ht = m_hhbcTrans;
   ht.setBcOff(ni.source.offset(),
-              ni.breaksTracelet && !m_hhbcTrans.isInlining());
+              ni.endsRegion && !m_hhbcTrans.isInlining());
   FTRACE(1, "\n{:-^60}\n", folly::format("Translating {}: {} with stack:\n{}",
                                          ni.offset(), ni.toString(),
                                          ht.showStack()));

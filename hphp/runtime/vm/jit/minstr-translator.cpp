@@ -34,11 +34,11 @@
 #include "hphp/util/assert-throw.h"
 #include "hphp/runtime/vm/jit/minstr-translator-internal.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 
 TRACE_SET_MOD(hhir);
 
-using HPHP::JIT::Location;
+using HPHP::jit::Location;
 
 static bool wantPropSpecializedWarnings() {
   return !RuntimeOption::RepoAuthoritative ||
@@ -1231,9 +1231,13 @@ static inline const TypedValue* elemArrayImpl(TypedValue* a,
   assert(a->m_type == KindOfArray);
   auto const ad = a->m_data.parr;
   if (converted) {
-    if (UNLIKELY(ad->isIntMapArray())) {
-      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                            ArrayData::kIntMapKind);
+    if (UNLIKELY(ad->isVPackedArrayOrIntMapArray())) {
+      if (ad->isVPackedArray()) {
+        PackedArray::warnUsage(PackedArray::Reason::kNumericString);
+      } else {
+        MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                              ArrayData::kIntMapKind);
+      }
     }
   }
   auto const ret = checkForInt ? checkedGet(ad, key)
@@ -1709,13 +1713,9 @@ static TypedValue arrayGetNotFound(const StringData* k) {
 }
 
 SSATmp* HhbcTranslator::MInstrTranslator::emitPackedArrayGet(SSATmp* base,
-                                                             SSATmp* key,
-                                                             bool profiled
-                                                             /* = false*/) {
-  // We can call emitPackedArrayGet on arrays for which we do not statically
-  // know that they are packed, if we have profile information for the array.
+                                                             SSATmp* key) {
   assert(base->isA(Type::Arr) &&
-         (profiled || base->type().getArrayKind() == ArrayData::kPackedKind));
+         base->type().getArrayKind() == ArrayData::kPackedKind);
 
   return m_irb.cond(
     1,
@@ -1739,9 +1739,13 @@ SSATmp* HhbcTranslator::MInstrTranslator::emitPackedArrayGet(SSATmp* base,
 template<KeyType keyType, bool checkForInt, bool converted>
 static inline TypedValue arrayGetImpl(ArrayData* a, key_type<keyType> key) {
   if (converted) {
-    if (UNLIKELY(a->isIntMapArray())) {
-      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                            ArrayData::kIntMapKind);
+    if (UNLIKELY(a->isVPackedArrayOrIntMapArray())) {
+      if (a->isVPackedArray()) {
+        PackedArray::warnUsage(PackedArray::Reason::kNumericString);
+      } else {
+        MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                              ArrayData::kIntMapKind);
+      }
     }
   }
   auto ret = checkForInt ? checkedGet(a, key) : a->nvGet(key);
@@ -1786,7 +1790,7 @@ const StaticString s_PackedArray("PackedArray");
 
 void HhbcTranslator::MInstrTranslator::emitProfiledArrayGet(SSATmp* key) {
   TargetProfile<NonPackedArrayProfile> prof(m_ht.m_context,
-                                            m_irb.state().marker(),
+                                            m_irb.marker(),
                                             s_PackedArray.get());
   if (prof.profiling()) {
     gen(ProfileArray, RDSHandleData { prof.handle() }, m_base);
@@ -1800,19 +1804,20 @@ void HhbcTranslator::MInstrTranslator::emitProfiledArrayGet(SSATmp* key) {
     auto const data = prof.data(NonPackedArrayProfile::reduce);
     // NonPackedArrayProfile data counts how many times a non-packed
     // array was observed.
-    if (data.count == 0) {
+    auto const typePackedArr = Type::Arr.specialize(ArrayData::kPackedKind);
+    if (data.count == 0 && m_base->type().maybe(typePackedArr)) {
       m_ht.emitIncStat(Stats::ArrayGet_Mono, 1, false);
       m_result = m_irb.cond(
         1,
         [&] (Block* taken) {
-          return gen(CheckType, Type::Arr.specialize(ArrayData::kPackedKind),
-                     taken, m_base);
+          return gen(CheckType, typePackedArr, taken, m_base);
         },
         [&] (SSATmp* base) { // Next
           m_ht.emitIncStat(Stats::ArrayGet_Packed, 1, false);
           m_irb.constrainValue(
             base, TypeConstraint(DataTypeSpecialized).setWantArrayKind());
-          return emitPackedArrayGet(base, key, true);
+          SSATmp* packedBase = gen(AssertType, typePackedArr, base);
+          return emitPackedArrayGet(packedBase, key);
         },
         [&] { // Taken
           m_irb.hint(Block::Hint::Unlikely);
@@ -2069,9 +2074,13 @@ static inline uint64_t arrayIssetImpl(ArrayData* a, key_type<keyType> key) {
   static_assert(!converted || keyType == KeyType::Int,
                 "Should have only been converted if KeyType is now an int");
   if (converted) {
-    if (UNLIKELY(a->isIntMapArray())) {
-      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                            ArrayData::kIntMapKind);
+    if (UNLIKELY(a->isVPackedArrayOrIntMapArray())) {
+      if (a->isVPackedArray()) {
+        PackedArray::warnUsage(PackedArray::Reason::kNumericString);
+      } else {
+        MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                              ArrayData::kIntMapKind);
+      }
     }
   }
   auto const value = checkForInt ? checkedGet(a, key) : a->nvGet(key);
@@ -2258,9 +2267,13 @@ static inline typename ShuffleReturn<setRef>::return_type arraySetImpl(
   ArrayData* ret = checkForInt ? checkedSet(a, key, value, copy)
                                : uncheckedSet(a, key, value, copy);
   if (converted) {
-    if (UNLIKELY(ret->isIntMapArray())) {
-      MixedArray::warnUsage(MixedArray::Reason::kNumericString,
-                            ArrayData::kIntMapKind);
+    if (UNLIKELY(ret->isVPackedArrayOrIntMapArray())) {
+      if (ret->isVPackedArray()) {
+        PackedArray::warnUsage(PackedArray::Reason::kNumericString);
+      } else {
+        MixedArray::warnUsage(MixedArray::Reason::kNumericString,
+                              ArrayData::kIntMapKind);
+      }
     }
   }
 
@@ -2353,7 +2366,7 @@ void setWithRefElemC(TypedValue* base, TypedValue key, TypedValue* val,
 
 void setWithRefNewElem(TypedValue* base, TypedValue* val,
                        MInstrState* mis) {
-  base = NewElem(mis->tvScratch, mis->tvRef, base);
+  base = NewElem<false>(mis->tvScratch, mis->tvRef, base);
   if (base != &mis->tvScratch) {
     tvDup(*val, *base);
   } else {

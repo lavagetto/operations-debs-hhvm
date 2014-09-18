@@ -82,6 +82,7 @@ public:
 
   static int  MaxLoopCount;
   static int  MaxSerializedStringSize;
+  static size_t ArrUnserializeCheckSize;
   static bool NoInfiniteRecursionDetection;
   static bool WarnTooManyArguments;
   static bool EnableHipHopErrors;
@@ -112,11 +113,7 @@ public:
   static int ServerBacklog;
   static int ServerConnectionLimit;
   static int ServerThreadCount;
-  static bool EnableMemoryProtector;
   static int ProdServerPort;
-  static int64_t MemoryThreshold;
-  static int MemProtectorWaitBeforeStart;
-  static int MemoryCheckFreq;
   static int QueuedJobsReleaseRate;
   static int ServerWarmupThrottleRequestCount;
   static bool ServerThreadRoundRobin;
@@ -136,7 +133,6 @@ public:
   static int PageletServerQueueLimit;
   static bool PageletServerThreadDropStack;
 
-  static int FiberCount;
   static int RequestTimeoutSeconds;
   static int PspTimeoutSeconds;
   static int64_t ServerMemoryHeadRoom;
@@ -238,8 +234,6 @@ public:
   static std::string RequestInitDocument;
   static std::string AutoPrependFile;
   static std::string AutoAppendFile;
-  static std::vector<std::string> ThreadDocuments;
-  static std::vector<std::string> ThreadLoopDocuments;
 
   static bool SafeFileAccess;
   static std::vector<std::string> AllowedDirectories;
@@ -352,6 +346,7 @@ public:
   static bool IntsOverflowToInts;
   static HackStrictOption StrictArrayFillKeys;
   static HackStrictOption DisallowDynamicVarEnvFuncs;
+  static bool LookForTypechecker;
 
   static int GetScannerType();
 
@@ -361,6 +356,12 @@ public:
   static std::set<std::string, stdltistr> DynamicInvokeFunctions;
 
   static const uint32_t kPCREInitialTableSize = 96 * 1024;
+
+  static std::string ExtensionDir;
+  static std::vector<std::string> Extensions;
+  static std::string DynamicExtensionPath;
+  static std::vector<std::string> DynamicExtensions;
+
 
 #define EVALFLAGS()                                                     \
   /* F(type, name, defaultVal) */                                       \
@@ -385,6 +386,7 @@ public:
   F(uint64_t, JitAFrozenSize,          40 << 20)                        \
   F(uint64_t, JitGlobalDataSize,       kJitGlobalDataDef)               \
   F(uint64_t, JitRelocationSize,       1 << 20)                         \
+  F(bool, JitTimer,                    kJitTimerDefault)                \
   F(bool, AllowHhas,                   false)                           \
   /* CheckReturnTypeHints:
      0 - no checks or enforcement
@@ -418,7 +420,8 @@ public:
   F(string, JitProfilePath,       std::string(""))                      \
   F(bool, JitTypePrediction,           true)                            \
   F(int32_t, JitStressTypePredPercent, 0)                               \
-  F(uint32_t, JitWarmupRequests,       kDefaultWarmupRequests)          \
+  F(uint32_t, JitProfileInterpRequests, kDefaultProfileInterpRequests)  \
+  F(uint32_t, NumSingleJitRequests,    20)                              \
   F(uint32_t, JitProfileRequests,      kDefaultProfileRequests)         \
   F(bool, JitProfileRecord,            false)                           \
   F(uint32_t, GdbSyncChunks,           128)                             \
@@ -433,7 +436,7 @@ public:
   F(bool, JitDisabledByHphpd,          false)                           \
   F(bool, JitTransCounters,            false)                           \
   F(bool, JitPseudomain,               jitPseudomainDefault())          \
-  F(bool, HHIRBytecodeControlFlow,     true)                            \
+  F(bool, HHIRBytecodeControlFlow,     controlFlowDefault())            \
   F(bool, HHIRCse,                     true)                            \
   F(bool, HHIRSimplification,          true)                            \
   F(bool, HHIRGenOpts,                 true)                            \
@@ -470,7 +473,7 @@ public:
   F(bool,     JitPGOUsePostConditions, true)                            \
   F(uint32_t, JitUnlikelyDecRefPercent,10)                              \
   F(uint32_t, JitPGOReleaseVVMinPercent, 10)                            \
-  F(uint32_t, HotFuncThreshold,        80)                              \
+  F(uint32_t, HotFuncCount,            4100)                            \
   F(bool, HHIRValidateRefCount,        debug)                           \
   F(bool, HHIRRelaxGuards,             true)                            \
   /* DumpBytecode =1 dumps user php, =2 dumps systemlib & user php */   \
@@ -522,6 +525,7 @@ public:
   static bool RepoCommit;
   static bool RepoDebugInfo;
   static bool RepoAuthoritative;
+  static bool RepoPreload;
 
   // Sandbox options
   static bool SandboxMode;
@@ -587,6 +591,9 @@ public:
   // Xenon options
   static double XenonPeriodSeconds;
   static bool XenonForceAlwaysOn;
+
+  static std::vector<void(*)(const IniSettingMap&, const Hdf&)>* OptionHooks;
+  static void AddOptionHook(void(*)(const IniSettingMap& ini, const Hdf&));
 
   // Convenience switch to turn on/off code alternatives via command-line
   // Do not commit code guarded by this flag, for evaluation only.

@@ -28,7 +28,7 @@
 // for specialized object tests to get some real VM::Class
 #include "hphp/system/systemlib.h"
 
-namespace HPHP {  namespace JIT {
+namespace HPHP { namespace jit {
 
 namespace {
 
@@ -300,6 +300,11 @@ TEST(Type, SpecializedObjects) {
 
   EXPECT_FALSE(exactA <= exactB);
   EXPECT_FALSE(subA <= exactB);
+
+  EXPECT_EQ(exactA & subA, exactA);
+  EXPECT_EQ(subA & exactA, exactA);
+  EXPECT_EQ(exactB & subB, exactB);
+  EXPECT_EQ(subB & exactB, exactB);
 }
 
 TEST(Type, Const) {

@@ -45,7 +45,7 @@
 #include "hphp/runtime/base/zend-math.h"
 #include "hphp/runtime/ext/ext_function.h"
 #include "hphp/runtime/ext/ext_hash.h"
-#include "hphp/runtime/ext/ext_misc.h"
+#include "hphp/runtime/ext/std/ext_std_misc.h"
 #include "hphp/runtime/ext/std/ext_std_options.h"
 #include "hphp/runtime/ext/wddx/ext_wddx.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
@@ -1007,8 +1007,9 @@ public:
           forceToArray(sess).set(key, vu.unserialize());
           php_global_set(s__SESSION, std::move(sess));
           p = vu.head();
-        } catch (Exception &e) {
-        }
+        } catch (const ResourceExceededException&) {
+          throw;
+        } catch (const Exception&) {}
       }
     }
     return true;
@@ -1071,8 +1072,9 @@ public:
           forceToArray(sess).set(key, vu.unserialize());
           php_global_set(s__SESSION, std::move(sess));
           q = vu.head();
-        } catch (Exception &e) {
-        }
+        } catch (const ResourceExceededException&) {
+          throw;
+        } catch (const Exception&) {}
       }
       p = q;
     }

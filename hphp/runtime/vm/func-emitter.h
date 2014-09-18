@@ -203,7 +203,6 @@ public:
   bool isPseudoMain() const;
   bool isMethod() const;
   bool isVariadic() const;
-  bool isHNINative() const;
 
   /*
    * @returns: std::make_pair(line1, line2)
@@ -284,6 +283,8 @@ public:
   bool isAsync;
   bool isGenerator;
   bool isPairGenerator;
+  bool isMemoizeImpl;
+  bool isMemoizeWrapper;
   bool containsCalls;
 
   LowStringPtr docComment;

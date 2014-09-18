@@ -19,7 +19,7 @@
 #include "hphp/runtime/base/repo-auth-type-codec.h"
 #include "hphp/runtime/vm/jit/translator.h"
 
-namespace HPHP { namespace JIT {
+namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
 /*
@@ -55,8 +55,7 @@ NormalizedInstruction::NormalizedInstruction(SrcKey sk, const Unit* u)
     , outPred(Type::Gen)
     , immVec()
     , nextOffset(kInvalidOffset)
-    , breaksTracelet(false)
-    , includeBothPaths(false)
+    , endsRegion(false)
     , nextIsMerge(false)
     , changesPC(opcodeChangesPC(sk.op()))
     , preppedByRef(false)

@@ -17,10 +17,13 @@
 
 #include "hphp/runtime/ext/xdebug/ext_xdebug.h"
 #include "hphp/runtime/ext/xdebug/xdebug_profiler.h"
+#include "hphp/runtime/ext/xdebug/xdebug_server.h"
 
+#include "hphp/runtime/base/array-util.h"
 #include "hphp/runtime/base/code-coverage.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/backtrace.h"
 #include "hphp/runtime/ext/ext_math.h"
 #include "hphp/runtime/ext/ext_string.h"
 #include "hphp/runtime/vm/unwind.h"
@@ -30,34 +33,12 @@
 namespace HPHP {
 
 ///////////////////////////////////////////////////////////////////////////////
-// Request Data
-
-struct XDebugRequestData final : RequestEventHandler {
-  void requestInit() override {
-    m_init_time = Timer::GetCurrentTimeMicros();
-    m_profiler_attached = false;
-  }
-
-  void requestShutdown() override {
-    m_init_time = 0;
-    m_profiler_attached = false;
-  }
-
-  bool m_profiler_attached;
-  int64_t m_init_time;
-};
-
-IMPLEMENT_STATIC_REQUEST_LOCAL(XDebugRequestData, s_request);
-
-///////////////////////////////////////////////////////////////////////////////
 // Helpers
 
 // Globals
 static const StaticString
   s_SERVER("_SERVER"),
-  s_COOKIE("_COOOKIE"),
-  s_GET("_GET"),
-  s_POST("_POST");
+  s_COOKIE("_COOKIE");
 
 // Returns the frame of the callee's callee. Useful for the xdebug_call_*
 // functions. Only returns nullptr if the callee is the top level pseudo-main
@@ -161,7 +142,7 @@ static String format_filename(String* dir,
       }
       // Timestamp (seconds)
       case 't': {
-        time_t sec = time(nullptr);
+        int64_t sec = (int64_t)time(nullptr);
         if (sec != -1) {
           buf.append(sec);
         }
@@ -245,7 +226,7 @@ DECLARE_EXTERN_REQUEST_LOCAL(ProfilerFactory, s_profiler_factory);
 
 // Returns the attached xdebug profiler. Requires one is attached.
 static inline XDebugProfiler* xdebug_profiler() {
-  assert(s_request->m_profiler_attached);
+  assert(XDEBUG_GLOBAL(ProfilerAttached));
   return (XDebugProfiler*) s_profiler_factory->getProfiler();
 }
 
@@ -254,21 +235,21 @@ static void start_tracing(XDebugProfiler* profiler,
                           String* filename = nullptr,
                           int64_t options = 0) {
   // Add ini settings
-  if (XDebugExtension::TraceOptions) {
+  if (XDEBUG_GLOBAL(TraceOptions)) {
     options |= k_XDEBUG_TRACE_APPEND;
   }
-  if (XDebugExtension::TraceFormat == 1) {
+  if (XDEBUG_GLOBAL(TraceFormat) == 1) {
     options |= k_XDEBUG_TRACE_COMPUTERIZED;
   }
-  if (XDebugExtension::TraceFormat == 2) {
+  if (XDEBUG_GLOBAL(TraceFormat) == 2) {
     options |= k_XDEBUG_TRACE_HTML;
   }
 
   // If no filename is passed, php5 xdebug stores in the default output
   // directory with the default file name
   String* dirname = nullptr;
-  String default_dirname(XDebugExtension::TraceOutputDir);
-  String default_filename(XDebugExtension::TraceOutputName);
+  String default_dirname(XDEBUG_GLOBAL(TraceOutputDir));
+  String default_filename(XDEBUG_GLOBAL(TraceOutputName));
   if (filename == nullptr) {
     dirname = &default_dirname;
     filename = &default_filename;
@@ -283,13 +264,13 @@ static void start_tracing(XDebugProfiler* profiler,
 static void start_profiling(XDebugProfiler* profiler) {
   // Add ini options
   int64_t opts = 0;
-  if (XDebugExtension::ProfilerAppend) {
+  if (XDEBUG_GLOBAL(ProfilerAppend)) {
     opts |= k_XDEBUG_PROFILE_APPEND;
   }
 
   // Create the filename then enable
-  String dirname(XDebugExtension::ProfilerOutputDir);
-  String filename(XDebugExtension::ProfilerOutputName);
+  String dirname(XDEBUG_GLOBAL(ProfilerOutputDir));
+  String filename(XDEBUG_GLOBAL(ProfilerOutputName));
   String abs_filename = format_filename(&dirname, filename, false);
   profiler->enableProfiling(abs_filename, opts);
 }
@@ -297,20 +278,19 @@ static void start_profiling(XDebugProfiler* profiler) {
 // Attempts to attach the xdebug profiler to the current thread. Assumes it
 // is not already attached. Raises an error on failure.
 static void attach_xdebug_profiler() {
-  assert(!s_request->m_profiler_attached);
-  if (s_profiler_factory->start(ProfilerFactory::XDebug, 0, false)) {
-    s_request->m_profiler_attached = true;
+  assert(!XDEBUG_GLOBAL(ProfilerAttached));
+  if (s_profiler_factory->start(ProfilerKind::XDebug, 0, false)) {
+    XDEBUG_GLOBAL(ProfilerAttached) = true;
     // Enable profiling and tracing if we need to
     XDebugProfiler* profiler = xdebug_profiler();
-    if (XDebugExtension::isProfilingNeeded()) {
+    if (XDebugProfiler::isProfilingNeeded()) {
       start_profiling(profiler);
     }
-    if (XDebugExtension::isTracingNeeded()) {
+    if (XDebugProfiler::isTracingNeeded()) {
       start_tracing(profiler);
     }
-    profiler->setCollectMemory(XDebugExtension::CollectMemory);
-    profiler->setCollectTime(XDebugExtension::CollectTime);
-    profiler->setBaseTime(s_request->m_init_time);
+    profiler->setCollectMemory(XDEBUG_GLOBAL(CollectMemory));
+    profiler->setCollectTime(XDEBUG_GLOBAL(CollectTime));
   } else {
     raise_error("Could not start xdebug profiler. Another profiler is "
                 "likely already attached to this thread.");
@@ -319,14 +299,14 @@ static void attach_xdebug_profiler() {
 
 // Detaches the xdebug profiler from the current thread
 static void detach_xdebug_profiler() {
-  assert(s_request->m_profiler_attached);
+  assert(XDEBUG_GLOBAL(ProfilerAttached));
   s_profiler_factory->stop();
-  s_request->m_profiler_attached = false;
+  XDEBUG_GLOBAL(ProfilerAttached) = false;
 }
 
 // Detaches the xdebug profiler if it's no longer needed
 static void detach_xdebug_profiler_if_needed() {
-  assert(s_request->m_profiler_attached);
+  assert(XDEBUG_GLOBAL(ProfilerAttached));
   XDebugProfiler* profiler = xdebug_profiler();
   if (!profiler->isCollecting()) {
     detach_xdebug_profiler();
@@ -452,14 +432,22 @@ static Array HHVM_FUNCTION(xdebug_get_declared_vars) {
   return vars.toArray();
 }
 
-static Array HHVM_FUNCTION(xdebug_get_function_stack)
-  XDEBUG_NOTIMPLEMENTED
+static Array HHVM_FUNCTION(xdebug_get_function_stack) {
+  // Need to reverse the backtrace to match php5 xdebug
+  Array bt = createBacktrace(BacktraceArgs()
+                             .skipTop()
+                             .withPseudoMain()
+                             .withArgNames()
+                             .withArgValues(*XDebugExtension::CollectParams));
+
+  return ArrayUtil::Reverse(bt).toArray();
+}
 
 static Array HHVM_FUNCTION(xdebug_get_headers)
   XDEBUG_NOTIMPLEMENTED
 
-static Variant HHVM_FUNCTION(xdebug_get_profiler_filename) {
-  if (!s_request->m_profiler_attached) {
+Variant HHVM_FUNCTION(xdebug_get_profiler_filename) {
+  if (!XDEBUG_GLOBAL(ProfilerAttached)) {
     return false;
   }
 
@@ -475,7 +463,7 @@ static int64_t HHVM_FUNCTION(xdebug_get_stack_depth)
   XDEBUG_NOTIMPLEMENTED
 
 static Variant HHVM_FUNCTION(xdebug_get_tracefile_name) {
-  if (s_request->m_profiler_attached) {
+  if (XDEBUG_GLOBAL(ProfilerAttached)) {
     XDebugProfiler* profiler = xdebug_profiler();
     if (profiler->isTracing()) {
       return profiler->getTracingFilename();
@@ -484,8 +472,9 @@ static Variant HHVM_FUNCTION(xdebug_get_tracefile_name) {
   return false;
 }
 
-static bool HHVM_FUNCTION(xdebug_is_enabled)
-  XDEBUG_NOTIMPLEMENTED
+static bool HHVM_FUNCTION(xdebug_is_enabled) {
+  return false;
+}
 
 static int64_t HHVM_FUNCTION(xdebug_memory_usage) {
   // With jemalloc, the usage can go negative (see ext_std_options.cpp:831)
@@ -538,7 +527,7 @@ static Variant HHVM_FUNCTION(xdebug_start_trace,
   String* traceFile = traceFileVar.isString()? &traceFileStr : nullptr;
 
   // Initialize the profiler if it isn't already
-  if (!s_request->m_profiler_attached) {
+  if (!XDEBUG_GLOBAL(ProfilerAttached)) {
     attach_xdebug_profiler();
   }
 
@@ -567,7 +556,7 @@ static void HHVM_FUNCTION(xdebug_stop_error_collection)
   XDEBUG_NOTIMPLEMENTED
 
 static Variant HHVM_FUNCTION(xdebug_stop_trace) {
-  if (!s_request->m_profiler_attached) {
+  if (!XDEBUG_GLOBAL(ProfilerAttached)) {
     return false;
   }
 
@@ -585,7 +574,7 @@ static Variant HHVM_FUNCTION(xdebug_stop_trace) {
 }
 
 static double HHVM_FUNCTION(xdebug_time_index) {
-  int64_t micro = Timer::GetCurrentTimeMicros() - s_request->m_init_time;
+  int64_t micro = Timer::GetCurrentTimeMicros() - XDEBUG_GLOBAL(InitTime);
   return micro * 1.0e-6;
 }
 
@@ -593,13 +582,17 @@ static TypedValue* HHVM_FN(xdebug_var_dump)(ActRec* ar)
   XDEBUG_NOTIMPLEMENTED
 
 static void HHVM_FUNCTION(_xdebug_check_trigger_vars) {
-  if (XDebugExtension::Enable && XDebugExtension::isProfilerNeeded()) {
+  if (XDebugExtension::Enable &&
+      XDebugProfiler::isNeeded() &&
+      !XDEBUG_GLOBAL(ProfilerAttached)) {
     attach_xdebug_profiler();
   }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Module implementation
 
+// XDebug constants
 static const StaticString
   s_XDEBUG_CC_UNUSED("XDEBUG_CC_UNUSED"),
   s_XDEBUG_CC_DEAD_CODE("XDEBUG_CC_DEAD_CODE"),
@@ -608,49 +601,91 @@ static const StaticString
   s_XDEBUG_TRACE_HTML("XDEBUG_TRACE_HTML"),
   s_XDEBUG_TRACE_NAKED_FILENAME("XDEBUG_TRACE_NAKED_FILENAME");
 
-bool XDebugExtension::isTriggerSet(const String& trigger) {
-  const ArrayData* globals = get_global_variables()->asArrayData();
-  Array get = globals->get(s_GET).toArray();
-  Array post = globals->get(s_POST).toArray();
-  Array cookies = globals->get(s_COOKIE).toArray();
-  return cookies.exists(trigger) || get.exists(trigger) || post.exists(trigger);
+// Helper for requestInit that returns the initial value for the given config
+// option.
+template <typename T>
+static inline T xdebug_init_opt(const char* name, T defVal,
+                                map<string, string>& envCfg) {
+  // First try to load the ini setting
+  folly::dynamic ini_val = folly::dynamic::object();
+  if (IniSetting::Get(XDEBUG_INI(name), ini_val)) {
+    T val;
+    ini_on_update(ini_val, val);
+    return val;
+  }
+
+  // Then try to load from the environment
+  map<string, string>::const_iterator env_iter = envCfg.find(name);
+  if (env_iter != envCfg.end()) {
+    T val;
+    ini_on_update(env_iter->second, val);
+    return val;
+  }
+
+  // Finally just use the default value
+  return defVal;
+}
+
+// Attempts to load the default idekey from environment variables
+static void loadIdeKey(map<string, string>& envCfg) {
+  const char* dbgp_idekey = getenv("DBGP_IDEKEY");
+  if (dbgp_idekey != nullptr) {
+    envCfg["idekey"] = dbgp_idekey;
+    return;
+  }
+
+  const char* user = getenv("USER");
+  if (user != nullptr) {
+    envCfg["idekey"] = user;
+    return;
+  }
+
+  const char* username = getenv("USERNAME");
+  if (username != nullptr) {
+    envCfg["idekey"] = username;
+  }
+}
+
+// Loads the "XDEBUG_CONFIG" environment variables.
+static void loadEnvConfig(map<string, string>& envCfg) {
+  // php5 xdebug grabs from getenv, not $_ENV
+  const char* cfg_raw = getenv("XDEBUG_CONFIG");
+  if (cfg_raw == nullptr) {
+    return;
+  }
+
+  // Parse the config variable. Format is "key=val" list separated by spaces
+  // This parsing isn't very efficient, but this isn't performance sensitive and
+  // it's similar to what php5 xdebug does.
+  Array cfg = StringUtil::Explode(String(cfg_raw, CopyString), " ").toArray();
+  for (ArrayIter iter(cfg); iter; ++iter) {
+    Array keyval = StringUtil::Explode(iter.second().toString(), "=").toArray();
+    if (keyval.size() != 2) {
+      continue;
+    }
+
+    string key = keyval[0].toString().toCppString();
+    string val = keyval[1].toString().toCppString();
+    if (key == "remote_enable" ||
+        key == "remote_port" ||
+        key == "remote_host" ||
+        key == "remote_handler" ||
+        key == "remote_mode" ||
+        key == "idekey" ||
+        key == "profiler_enable" ||
+        key == "profiler_output_dir" ||
+        key == "profiler_enable_trigger" ||
+        key == "remote_log" ||
+        key == "remote_cookie_expire_time" ||
+        key == "cli_color") {
+      envCfg[key] = val;
+    }
+  }
 }
 
 void XDebugExtension::moduleLoad(const IniSetting::Map& ini, Hdf xdebug_hdf) {
   Hdf hdf = xdebug_hdf[XDEBUG_NAME];
   Enable = Config::GetBool(ini, hdf["enable"], false);
-  if (!Enable) {
-    return;
-  }
-
-  // Standard config options
-  #define XDEBUG_OPT(T, name, sym, val) Config::Bind(sym, ini, hdf[name], val);
-  XDEBUG_CFG
-  #undef XDEBUG_OPT
-
-  // Profiler config options
-  #define XDEBUG_OPT(T, name, sym, defVal) \
-    sym = Config::GetBool(ini, hdf[name], defVal); \
-    IniSetting::Bind(IniSetting::CORE, IniSetting::PHP_INI_SYSTEM, name, \
-                     IniSetting::SetAndGet<T>([](const T& val) { \
-                       if (s_request->m_profiler_attached) { \
-                         xdebug_profiler()->set##sym(val); \
-                         detach_xdebug_profiler_if_needed(); \
-                       } \
-                       return true; \
-                    }, nullptr), &sym);
-  XDEBUG_PROF_CFG
-  #undef XDEBUG_OPT
-
-  // hhvm.xdebug.dump.*
-  Hdf dump = hdf["dump"];
-  Config::Bind(DumpCookie, ini, dump["COOKIE"], "");
-  Config::Bind(DumpFiles, ini, dump["FILES"], "");
-  Config::Bind(DumpGet, ini, dump["GET"], "");
-  Config::Bind(DumpPost, ini, dump["POST"], "");
-  Config::Bind(DumpRequest, ini, dump["REQUEST"], "");
-  Config::Bind(DumpServer, ini, dump["SERVER"], "");
-  Config::Bind(DumpSession, ini, dump["SESSION"], "");
 }
 
 void XDebugExtension::moduleInit() {
@@ -689,7 +724,8 @@ void XDebugExtension::moduleInit() {
   HHVM_FE(xdebug_get_code_coverage);
   HHVM_FE(xdebug_get_collected_errors);
   HHVM_FE(xdebug_get_declared_vars);
-  HHVM_FE(xdebug_get_function_stack);
+  HHVM_NAMED_FE(__SystemLib\\xdebug_get_function_stack,
+                HHVM_FN(xdebug_get_function_stack));
   HHVM_FE(xdebug_get_headers);
   HHVM_FE(xdebug_get_profiler_filename);
   HHVM_FE(xdebug_get_stack_depth);
@@ -711,31 +747,82 @@ void XDebugExtension::moduleInit() {
 }
 
 void XDebugExtension::requestInit() {
-  if (Enable && XDebugExtension::isProfilerNeeded()) {
+  if (!Enable) {
+    return;
+  }
+
+  // Load the settings passed in environment variables
+  map<string, string> env_cfg;
+  loadIdeKey(env_cfg);
+  loadEnvConfig(env_cfg);
+
+  // Thread local config options
+  #define XDEBUG_OPT(T, name, sym, val) { \
+    XDEBUG_GLOBAL(sym) = xdebug_init_opt<T>(name, val, env_cfg); \
+    IniSetting::Bind(this, IniSetting::PHP_INI_ALL, \
+                     XDEBUG_INI(name), &XDEBUG_GLOBAL(sym)); \
+  }
+  XDEBUG_CFG
+  #undef XDEBUG_OPT
+
+  // hhvm.xdebug.dump.*
+  #define XDEBUG_OPT(T, name, sym, val) { \
+    XDEBUG_GLOBAL(sym) = xdebug_init_opt<T>(name, val, env_cfg); \
+    IniSetting::Bind(this, IniSetting::PHP_INI_ALL, \
+                     XDEBUG_INI(name), &XDEBUG_GLOBAL(sym)); \
+  }
+  XDEBUG_DUMP_CFG
+  #undef XDEBUG_OPT
+
+  // Profiler config options
+  #define XDEBUG_OPT(T, name, sym, def) \
+    XDEBUG_GLOBAL(sym) = xdebug_init_opt<T>(name, def, env_cfg); \
+    IniSetting::Bind(this, IniSetting::PHP_INI_ALL, XDEBUG_INI(name), \
+                     IniSetting::SetAndGet<T>([](const T& val) { \
+                       if (XDEBUG_GLOBAL(ProfilerAttached)) { \
+                         xdebug_profiler()->set##sym(val); \
+                         detach_xdebug_profiler_if_needed(); \
+                       } \
+                       return true; \
+                    }, nullptr), &XDEBUG_GLOBAL(sym));
+  XDEBUG_PROF_CFG
+  #undef XDEBUG_OPT
+
+  // Custom request local globals
+  #define XDEBUG_OPT(T, name, sym, val) XDEBUG_GLOBAL(sym) = val;
+  XDEBUG_CUSTOM_GLOBALS
+  #undef XDEBUG_OPT
+
+  // Let the server do initialization
+  XDebugServer::onRequestInit();
+
+  // Potentially attach the xdebug profiler
+  if (XDebugProfiler::isNeeded()) {
     attach_xdebug_profiler();
   }
 }
 
 void XDebugExtension::requestShutdown() {
-  if (Enable && s_request->m_profiler_attached) {
+  if (!Enable) {
+    return;
+  }
+
+  // Potentially kill the profiler
+  if (XDEBUG_GLOBAL(ProfilerAttached)) {
     detach_xdebug_profiler();
   }
 }
 
 // Non-bind config options and edge-cases
 bool XDebugExtension::Enable = false;
-string XDebugExtension::DumpCookie = "";
-string XDebugExtension::DumpFiles = "";
-string XDebugExtension::DumpGet = "";
-string XDebugExtension::DumpPost = "";
-string XDebugExtension::DumpRequest = "";
-string XDebugExtension::DumpServer = "";
-string XDebugExtension::DumpSession = "";
 
 // Standard config options
-#define XDEBUG_OPT(T, name, sym, val) T XDebugExtension::sym = val;
+#define XDEBUG_OPT(T, name, sym, val) \
+  IMPLEMENT_THREAD_LOCAL(T, XDebugExtension::sym);
 XDEBUG_CFG
+XDEBUG_DUMP_CFG
 XDEBUG_PROF_CFG
+XDEBUG_CUSTOM_GLOBALS
 #undef XDEBUG_OPT
 
 static XDebugExtension s_xdebug_extension;

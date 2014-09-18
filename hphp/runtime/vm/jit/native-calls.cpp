@@ -30,8 +30,7 @@
 #include "hphp/runtime/ext/asio/static_wait_handle.h"
 #include "hphp/runtime/ext/ext_array.h"
 
-namespace HPHP {  namespace JIT { namespace NativeCalls {
-
+namespace HPHP { namespace jit { namespace NativeCalls {
 
 namespace {
 
@@ -174,6 +173,9 @@ static CallMap s_callMap {
     {Clone,              &ObjectData::clone, DSSA, SSync, {{SSA, 0}}},
     {NewArray,           MixedArray::MakeReserve, DSSA, SNone, {{SSA, 0}}},
     {NewMixedArray,      MixedArray::MakeReserveMixed, DSSA, SNone, {{SSA, 0}}},
+    {NewVArray,         MixedArray::MakeReserveVArray, DSSA, SNone, {{SSA, 0}}},
+    {NewMIArray,        MixedArray::MakeReserveIntMap, DSSA, SNone, {{SSA, 0}}},
+    {NewMSArray,        MixedArray::MakeReserveStrMap, DSSA, SNone, {{SSA, 0}}},
     {NewLikeArray,       MixedArray::MakeReserveLike, DSSA, SNone,
                            {{SSA, 0}, {SSA, 1}}},
     {NewPackedArray,     MixedArray::MakePacked, DSSA, SNone,
@@ -191,6 +193,7 @@ static CallMap s_callMap {
                            {{extra(&ClassData::cls)}}},
     {InitSProps,         &Class::initSProps, DNone, SSync,
                            {{extra(&ClassData::cls)}}},
+    {RegisterLiveObj,    registerLiveObj, DNone, SNone, {{SSA, 0}}},
     {LdClsCtor,          loadClassCtor, DSSA, SSync,
                            {{SSA, 0}}},
     {LookupClsRDSHandle, lookupClsRDSHandle, DSSA, SNone, {{SSA, 0}}},
@@ -379,34 +382,6 @@ static CallMap s_callMap {
     {CountArray, &ArrayData::size, DSSA, SNone, {{SSA, 0}}},
 };
 
-ArgGroup CallInfo::toArgGroup(const RegAllocInfo& regs,
-                              const IRInstruction* inst) const {
-  ArgGroup argGroup{inst, regs[inst]};
-  for (auto const& arg : args) {
-    switch (arg.type) {
-    case ArgType::SSA:
-      argGroup.ssa(arg.ival);
-      break;
-    case ArgType::TV:
-      argGroup.typedValue(arg.ival);
-      break;
-    case ArgType::MemberKeyS:
-      argGroup.memberKeyS(arg.ival);
-      break;
-    case ArgType::MemberKeyIS:
-      argGroup.memberKeyIS(arg.ival);
-      break;
-    case ArgType::ExtraImm:
-      argGroup.imm(arg.extraFunc(inst));
-      break;
-    case ArgType::Imm:
-      argGroup.imm(arg.ival);
-      break;
-    }
-  }
-  return argGroup;
-}
-
 CallMap::CallMap(CallInfoList infos) {
   for (auto const& info : infos) {
     m_map[info.op] = info;
@@ -433,4 +408,67 @@ const CallInfo& CallMap::info(Opcode op) {
   return it->second;
 }
 
-} } }
+} // NativeCalls
+
+namespace x64 {
+using namespace NativeCalls;
+ArgGroup toArgGroup(const CallInfo& info, const jit::vector<Vloc>& locs,
+                    const IRInstruction* inst) {
+  ArgGroup argGroup{inst, locs};
+  for (auto const& arg : info.args) {
+    switch (arg.type) {
+    case ArgType::SSA:
+      argGroup.ssa(arg.ival);
+      break;
+    case ArgType::TV:
+      argGroup.typedValue(arg.ival);
+      break;
+    case ArgType::MemberKeyS:
+      argGroup.memberKeyS(arg.ival);
+      break;
+    case ArgType::MemberKeyIS:
+      argGroup.memberKeyIS(arg.ival);
+      break;
+    case ArgType::ExtraImm:
+      argGroup.imm(arg.extraFunc(inst));
+      break;
+    case ArgType::Imm:
+      argGroup.imm(arg.ival);
+      break;
+    }
+  }
+  return argGroup;
+}
+} // X64
+namespace arm {
+using namespace NativeCalls;
+ArgGroup toArgGroup(const CallInfo& info, const RegAllocInfo& regs,
+                    const IRInstruction* inst) {
+  ArgGroup argGroup{inst, regs[inst]};
+  for (auto const& arg : info.args) {
+    switch (arg.type) {
+    case ArgType::SSA:
+      argGroup.ssa(arg.ival);
+      break;
+    case ArgType::TV:
+      argGroup.typedValue(arg.ival);
+      break;
+    case ArgType::MemberKeyS:
+      argGroup.memberKeyS(arg.ival);
+      break;
+    case ArgType::MemberKeyIS:
+      argGroup.memberKeyIS(arg.ival);
+      break;
+    case ArgType::ExtraImm:
+      argGroup.imm(arg.extraFunc(inst));
+      break;
+    case ArgType::Imm:
+      argGroup.imm(arg.ival);
+      break;
+    }
+  }
+  return argGroup;
+}
+} // ARM
+
+} }

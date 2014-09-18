@@ -15,7 +15,8 @@
 */
 #include "hphp/runtime/vm/repo.h"
 
-#include "folly/Format.h"
+#include <folly/Format.h>
+#include <folly/experimental/Singleton.h>
 
 #include "hphp/util/logger.h"
 #include "hphp/util/trace.h"
@@ -70,6 +71,7 @@ bool Repo::prefork() {
   if (!t_dh.isNull()) {
     t_dh.destroy();
   }
+  folly::SingletonVault::singleton()->destroyInstances();
   s_lock.lock();
   if (s_nRepos > 0) {
     s_lock.unlock();
@@ -223,15 +225,22 @@ Unit* Repo::loadUnit(const std::string& name, const MD5& md5) {
   return m_urp.load(name, md5);
 }
 
-std::vector<std::pair<std::string,MD5>> Repo::enumerateUnits() {
+std::vector<std::pair<std::string,MD5>>
+Repo::enumerateUnits(int repoId, bool preloadOnly, bool warn) {
   std::vector<std::pair<std::string,MD5>> ret;
 
   try {
     RepoStmt stmt(*this);
-    stmt.prepare(
-      folly::format(
-        "SELECT path, md5 FROM {};", table(RepoIdCentral, "FileMd5")
-      ).str()
+    stmt.prepare(preloadOnly ?
+                 folly::sformat(
+                   "SELECT path, {0}.md5 FROM {0} "
+                   "LEFT JOIN {1} ON ({0}.md5={1}.md5) WHERE preload != 0 "
+                   "ORDER BY preload DESC;",
+                   table(repoId, "FileMd5"),
+                   table(repoId, "Unit")) :
+                 folly::sformat(
+                   "SELECT path, md5 FROM {};",
+                   table(repoId, "FileMd5"))
     );
     RepoTxn txn(*this);
     RepoTxnQuery query(txn, stmt);
@@ -248,7 +257,9 @@ std::vector<std::pair<std::string,MD5>> Repo::enumerateUnits() {
 
     txn.commit();
   } catch (RepoExc& e) {
-    fprintf(stderr, "failed to enumerate units: %s\n", e.what());
+    if (warn) {
+      fprintf(stderr, "failed to enumerate units: %s\n", e.what());
+    }
   }
 
   return ret;

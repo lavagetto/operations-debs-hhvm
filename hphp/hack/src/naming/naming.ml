@@ -54,6 +54,9 @@ type genv = {
   (* are we in the body of a non-static member function? *)
   in_member_fun: bool;
 
+  (* are we in the body of an enum? *)
+  in_enum: bool;
+
   (* In function foo<T1, ..., Tn> or class<T1, ..., Tn>, the field
    * type_params knows T1 .. Tn. It is able to find out about the
    * constraint on these parameters. *)
@@ -145,6 +148,13 @@ type lenv = {
      * See expr_lambda for details.
      *)
     unbound_mode: unbound_mode;
+
+    (* The presence of "yield" in the function body changes the type of the
+     * function into a generator, with no other syntactic indications
+     * elsewhere. For the sanity of the typechecker, we flatten this out into
+     * fun_kind, but need to track if we've seen a "yield" in order to do so.
+     *)
+    has_yield: bool ref;
   }
 
 (* The environment VISIBLE to the outside world. *)
@@ -208,12 +218,14 @@ module Env = struct
     pending_locals = ref SMap.empty;
     find_refs_target_name = ref None;
     unbound_mode = UBMErr;
+    has_yield = ref false;
   }
 
   let empty_global env = {
     in_mode       = Ast.Mstrict;
     in_try        = false;
     in_member_fun = false;
+    in_enum       = false;
     type_params   = SMap.empty;
     type_paraml   = [];
     classes       = ref env.iclasses;
@@ -230,6 +242,7 @@ module Env = struct
       (if !Autocomplete.auto_complete then Ast.Mpartial else c.c_mode);
     in_try        = false;
     in_member_fun = false;
+    in_enum       = c.c_kind = Cenum;
     type_params   = params;
     type_paraml   = List.map fst c.c_tparams;
     classes       = ref genv.iclasses;
@@ -251,6 +264,7 @@ module Env = struct
     in_mode       = (if !Ide.is_ide_mode then Ast.Mpartial else Ast.Mstrict);
     in_try        = false;
     in_member_fun = false;
+    in_enum       = false;
     type_params   = cstrs;
     type_paraml   = List.map fst tdef.t_tparams;
     classes       = ref genv.iclasses;
@@ -272,6 +286,7 @@ module Env = struct
     in_mode       = f.f_mode;
     in_try        = false;
     in_member_fun = false;
+    in_enum       = false;
     type_params   = params;
     type_paraml   = [];
     classes       = ref genv.iclasses;
@@ -287,6 +302,7 @@ module Env = struct
     in_mode       = cst.cst_mode;
     in_try        = false;
     in_member_fun = false;
+    in_enum       = false;
     type_params   = SMap.empty;
     type_paraml   = [];
     classes       = ref genv.iclasses;
@@ -491,7 +507,13 @@ module Env = struct
 
   let class_name (genv, _) x =
     let x = Namespaces.elaborate_id genv.namespace x in
-    canonicalize genv genv.classes x
+    let pos, name = canonicalize genv genv.classes x in
+    (* Don't let people use strictly internal classes
+     * (except when they are being declared in .hhi files) *)
+    if name = "\\HH\\BuiltinEnum" &&
+      not (str_ends_with (Pos.filename pos) ".hhi") then
+      Errors.using_internal_class pos (strip_ns name);
+    pos, name
 
   let fun_id (genv, _) x =
     elaborate_and_get_name_with_fallback
@@ -703,32 +725,105 @@ and hint_id ~allow_this env is_static_var (p, x as id) hl =
   (* some common Xhp screw ups *)
   if   (x = "Xhp") || (x = ":Xhp") || (x = "XHP")
   then Errors.disallowed_xhp_type p x;
+  match try_castable_hint ~allow_this env p x hl with
+  | Some h -> h
+  | None -> begin
+    match x with
+    | "\\void"
+    | "\\int"
+    | "\\bool"
+    | "\\float"
+    | "\\num"
+    | "\\string"
+    | "\\resource"
+    | "\\mixed"
+    | "\\array"
+    | "\\integer"
+    | "\\boolean"
+    | "\\double"
+    | "\\real" ->
+        Errors.primitive_toplevel p;
+        N.Hany
+    | "void"             -> N.Hprim N.Tvoid
+    | "num"              -> N.Hprim N.Tnum
+    | "resource"         -> N.Hprim N.Tresource
+    | "mixed"            -> N.Hmixed
+    | "this" when allow_this ->
+        if hl != []
+        then Errors.this_no_argument p;
+        (match (fst env).cclass with
+        | None ->
+          Errors.this_outside_of_class p;
+          N.Hany
+        | Some cid ->
+          let tparaml = (fst env).type_paraml in
+          let tparaml = List.map begin fun (param_pos, param_name) ->
+            let _, cstr = get_constraint env param_name in
+            let cstr = opt_map (hint env) cstr in
+            param_pos, N.Habstr (param_name, cstr)
+          end tparaml in
+          N.Habstr ("this", Some (fst cid, N.Happly (cid, tparaml))))
+    | "this" ->
+        (match (fst env).cclass with
+        | None ->
+            Errors.this_outside_of_class p
+        | Some _ ->
+            Errors.this_must_be_return p
+        );
+        N.Hany
+    | _ when String.lowercase x = "this" ->
+        Errors.lowercase_this p x;
+        N.Hany
+    | _ when SMap.mem x params ->
+        if hl <> [] then
+        Errors.tparam_with_tparam p x;
+        let env, gen_constraint = get_constraint env x in
+        N.Habstr (x, opt_map (hint env) gen_constraint)
+    | _ ->
+        (* In the future, when we have proper covariant support, we can
+         * allow "this" to instantiate any covariant type variable. For
+         * example, let us pretend that we have this defined:
+         *
+         *   interface IFoo<read Tread, write Twrite>
+         *
+         * IFoo<this, int> and IFoo<IFoo<this, int>, int> are ok
+         * IFoo<int, this> and IFoo<int, IFoo<this>> are not ok
+         *
+         * For now, we're hardcoding the fact that all type variables for
+         * Awaitable and WaitHandle are covariant (well, there's only one
+         * type variable, but yeah...). We turn on allow_this in
+         * Awaitable and WaitHandle cases to support members that look
+         * like:
+         *
+         *   private ?WaitHandle<this> wh = ...; // e.g. generic preparables
+         *)
+      let cname = snd (Env.class_name env id) in
+      let gen_read_api_covariance =
+        (cname = "\\GenReadApi" || cname = "\\GenReadIdxApi") in
+      let privacy_policy_base_covariance =
+        (cname = "\\PrivacyPolicyBase") in
+      let data_type_covariance =
+        (cname = "\\DataType" || cname = "\\DataTypeImplProvider") in
+      let awaitable_covariance =
+        (cname = "\\Awaitable" || cname = "\\WaitHandle") in
+      let allow_this = allow_this &&
+        (awaitable_covariance || gen_read_api_covariance ||
+         privacy_policy_base_covariance || data_type_covariance) in
+      N.Happly (Env.class_name env id, hintl ~allow_this env hl)
+  end
+
+(* Hints that are valid both as casts and type annotations.  Neither casts nor
+ * annotations are a strict subset of the other: For instance, 'object' is not
+ * a valid annotation.  Thus callers will have to handle the remaining cases. *)
+and try_castable_hint ?(allow_this=false) env p x hl =
+  let hint = hint ~allow_this in
   match x with
-  | "\\void"
-  | "\\int"
-  | "\\bool"
-  | "\\float"
-  | "\\num"
-  | "\\string"
-  | "\\resource"
-  | "\\mixed"
-  | "\\array"
-  | "\\integer"
-  | "\\boolean"
-  | "\\double"
-  | "\\real" ->
-      Errors.primitive_toplevel p;
-      N.Hany
-  | "void"             -> N.Hprim N.Tvoid
-  | "int"              -> N.Hprim N.Tint
-  | "bool"             -> N.Hprim N.Tbool
-  | "float"            -> N.Hprim N.Tfloat
-  | "num"              -> N.Hprim N.Tnum
-  | "string"           -> N.Hprim N.Tstring
-  | "resource"         -> N.Hprim N.Tresource
-  | "mixed"            -> N.Hmixed
-  | "array"            ->
-      (match hl with
+  | "int"    -> Some (N.Hprim N.Tint)
+  | "bool"   -> Some (N.Hprim N.Tbool)
+  | "float"  -> Some (N.Hprim N.Tfloat)
+  | "string" -> Some (N.Hprim N.Tstring)
+  | "array"  ->
+      Some (match hl with
       | [] -> N.Harray (None, None)
       | [x] -> N.Harray (Some (hint env x), None)
       | [x; y] -> N.Harray (Some (hint env x), Some (hint env y))
@@ -736,75 +831,17 @@ and hint_id ~allow_this env is_static_var (p, x as id) hl =
       )
   | "integer" ->
       Errors.integer_instead_of_int p;
-      N.Hprim N.Tint
+      Some (N.Hprim N.Tint)
   | "boolean" ->
       Errors.boolean_instead_of_bool p;
-      N.Hprim N.Tbool
+      Some (N.Hprim N.Tbool)
   | "double" ->
       Errors.double_instead_of_float p;
-      N.Hprim N.Tfloat
+      Some (N.Hprim N.Tfloat)
   | "real" ->
       Errors.real_instead_of_float p;
-       N.Hprim N.Tfloat
-  | "this" when allow_this ->
-      if hl != []
-      then Errors.this_no_argument p;
-      (match (fst env).cclass with
-      | None ->
-        Errors.this_outside_of_class p;
-        N.Hany
-      | Some cid ->
-        let tparaml = (fst env).type_paraml in
-        let tparaml = List.map begin fun (param_pos, param_name) ->
-          let _, cstr = get_constraint env param_name in
-          let cstr = opt_map (hint env) cstr in
-          param_pos, N.Habstr (param_name, cstr)
-        end tparaml in
-        N.Habstr ("this", Some (fst cid, N.Happly (cid, tparaml))))
-  | "this" ->
-      (match (fst env).cclass with
-      | None ->
-          Errors.this_outside_of_class p
-      | Some _ ->
-          Errors.this_must_be_return p
-      );
-      N.Hany
-  | _ when String.lowercase x = "this" ->
-      Errors.lowercase_this p x;
-      N.Hany
-  | _ when SMap.mem x params ->
-      if hl <> [] then
-      Errors.tparam_with_tparam p x;
-      let env, gen_constraint = get_constraint env x in
-      N.Habstr (x, opt_map (hint env) gen_constraint)
-  | _ ->
-      (* In the future, when we have proper covariant support, we can
-       * allow "this" to instantiate any covariant type variable. For
-       * example, let us pretend that we have this defined:
-       *
-       *   interface IFoo<read Tread, write Twrite>
-       *
-       * IFoo<this, int> and IFoo<IFoo<this, int>, int> are ok
-       * IFoo<int, this> and IFoo<int, IFoo<this>> are not ok
-       *
-       * For now, we're hardcoding the fact that all type variables for
-       * Awaitable and WaitHandle are covariant (well, there's only one
-       * type variable, but yeah...). We turn on allow_this in
-       * Awaitable and WaitHandle cases to support members that look
-       * like:
-       *
-       *   private ?WaitHandle<this> wh = ...; // e.g. generic preparables
-       *)
-    let cname = snd (Env.class_name env id) in
-    let gen_read_api_covariance =
-      (cname = "\\GenReadApi" || cname = "\\GenReadIdxApi") in
-    let privacy_policy_base_covariance =
-      (cname = "\\PrivacyPolicyBase") in
-    let awaitable_covariance =
-      (cname = "\\Awaitable" || cname = "\\WaitHandle") in
-    let allow_this = allow_this &&
-      (awaitable_covariance || gen_read_api_covariance || privacy_policy_base_covariance) in
-    N.Happly (Env.class_name env id, hintl ~allow_this env hl)
+      Some (N.Hprim N.Tfloat)
+  | _ -> None
 
 and get_constraint env tparam =
   let params = (fst env).type_params in
@@ -908,6 +945,7 @@ and class_ genv c =
   let constructor, methods, smethods =
     interface c constructor methods smethods in
   let class_tparam_names = List.map (fun (x,_) -> x) c.c_tparams in
+  let enum = opt_map (enum_ env) c.c_enum in
   check_name_collision methods;
   check_tparams_shadow class_tparam_names methods;
   check_name_collision smethods;
@@ -930,6 +968,12 @@ and class_ genv c =
     N.c_static_methods = smethods;
     N.c_methods        = methods;
     N.c_user_attributes = c.c_user_attributes;
+    N.c_enum           = enum
+  }
+
+and enum_ env e =
+  { N.e_base       = hint env e.e_base;
+    N.e_constraint = opt_map (hint env) e.e_constraint;
   }
 
 and type_paraml env tparams =
@@ -1059,8 +1103,33 @@ and class_method env sids cv_ids x acc =
       method_ env m :: acc
   | Method _ -> acc
 
+and check_constant_expr (pos, e) =
+  match e with
+  | Unsafeexpr _ | Id _ | Null | True | False | Int _
+  | Float _ | String _
+  | String2 ([], _) -> ()
+  | Class_const ((_, cls), _) when cls <> "static" -> ()
+
+  | Unop ((Uplus | Uminus | Utild | Unot), e) -> check_constant_expr e
+  | Binop (op, e1, e2) ->
+    (* Only assignment is invalid *)
+    (match op with
+      | Eq _ -> Errors.illegal_constant pos
+      | _ ->
+        check_constant_expr e1;
+        check_constant_expr e2)
+  | Eif (e1, e2, e3) ->
+    check_constant_expr e1;
+    ignore (opt_map check_constant_expr e2);
+    check_constant_expr e3
+
+  | String2 ((var_pos, _) :: _, _) ->
+      Errors.local_const var_pos
+  | _ -> Errors.illegal_constant pos
+
 and const_defl h env l = List.map (const_def h env) l
 and const_def h env (x, e) =
+  check_constant_expr e;
   match (fst env).in_mode with
   | Ast.Mstrict ->
       (* TODO THIS IS A BUG!!!! You should always try to guess the type of
@@ -1068,10 +1137,9 @@ and const_def h env (x, e) =
        *)
       (match h with
       | None ->
-          (* Whenever the type is "obvious", no need to add a type-hint
-             if you add a case here, make sure you add it in the type-checker too
-             cf class_const_decl in typing.ml
-           *)
+          (* Whenever the type is "obvious", no need to add a
+             type-hint if you add a case here, make sure you add it in
+             the type-checker too cf class_const_decl in typing.ml *)
           (match snd e with
           | String _
           | String2 ([], _)
@@ -1082,8 +1150,12 @@ and const_def h env (x, e) =
           | Array _ ->
               None, Env.new_const env x, expr env e
           | _ ->
-            Errors.missing_typehint (fst x);
-              None, Env.new_const env x, (fst e, N.Any)
+            (* Missing annotation fine if this is an enum. *)
+            if (fst env).in_enum then
+              (None, Env.new_const env x, expr env e)
+            else
+              (Errors.missing_typehint (fst x);
+               None, Env.new_const env x, (fst e, N.Any))
           )
       | Some h ->
           let h = Some (hint env h) in
@@ -1136,6 +1208,13 @@ and fill_cvar kl ty x =
     | Protected -> { x with N.cv_visibility = N.Protected }
  ) x kl
 
+and fun_kind env ft =
+  match !((snd env).has_yield), ft with
+  | false, Ast.FSync -> N.FSync
+  | false, Ast.FAsync -> N.FAsync
+  | true, Ast.FSync -> N.FGenerator
+  | true, Ast.FAsync -> N.FAsyncGenerator
+
 and method_ env m =
   let genv, lenv = env in
   let lenv = Env.empty_local() in
@@ -1154,7 +1233,7 @@ and method_ env m =
         block env m.m_body
     | Ast.Mdecl -> [] in
   let attrs = m.m_user_attributes in
-  let method_type = m.m_type in
+  let method_type = fun_kind env m.m_fun_kind in
   let ret = opt_map (hint ~allow_this:true env) m.m_ret in
   N.({ m_unsafe     = unsafe ;
        m_final      = final  ;
@@ -1167,7 +1246,7 @@ and method_ env m =
        m_user_attributes = attrs;
        m_ret        = ret    ;
        m_variadic   = variadicity;
-       m_type       = method_type;
+       m_fun_kind   = method_type;
      })
 
 and kind (final, abs, vis) = function
@@ -1236,6 +1315,7 @@ and fun_ genv f =
     | Ast.Mstrict | Ast.Mpartial -> block env f.f_body
     | Ast.Mdecl -> []
   in
+  let kind = fun_kind env f.f_fun_kind in
   let fun_ =
     { N.f_unsafe = unsafe;
       f_mode = f.f_mode;
@@ -1245,7 +1325,7 @@ and fun_ genv f =
       f_params = paraml;
       f_body = body;
       f_variadic = variadicity;
-      f_type = f.f_type;
+      f_fun_kind = kind;
     } in
   fun_
 
@@ -1263,8 +1343,8 @@ and stmt env st =
   | Fallthrough          -> N.Fallthrough
   | Noop                 -> N.Noop
   | Expr e               -> N.Expr (expr env e)
-  | Break                -> N.Break
-  | Continue             -> N.Continue
+  | Break p              -> N.Break p
+  | Continue p           -> N.Continue p
   | Throw e              -> let terminal = not (fst env).in_try in
                             N.Throw (terminal, expr env e)
   | Return (p, e)        -> N.Return (p, oexpr env e)
@@ -1274,7 +1354,7 @@ and stmt env st =
   | While (e, b)         -> while_stmt env e b
   | For (st1, e, st2, b) -> for_stmt env st1 e st2 b
   | Switch (e, cl)       -> switch_stmt env st e cl
-  | Foreach (e, ae, b)   -> foreach_stmt env e ae b
+  | Foreach (e, aw, ae, b)-> foreach_stmt env e aw ae b
   | Try (b, cl, fb)      -> try_stmt env st b cl fb
 
 and if_stmt env st e b1 b2 =
@@ -1327,32 +1407,41 @@ and switch_stmt env st e cl =
  Env.promote_pending env;
  result
 
-and foreach_stmt env e ae b =
+and foreach_stmt env e aw ae b =
   let e = expr env e in
   Env.scope env (
   fun env ->
     let _, lenv = env in
     let all_locals_copy = !(lenv.all_locals) in
-    let ae = as_expr env ae in
+    let ae = as_expr env aw ae in
     let all_locals, b = branch env b in
     lenv.all_locals := SMap.union all_locals all_locals_copy;
     N.Foreach (e, ae, b)
  )
 
-and as_expr env = function
-  | As_id (p, Lvar x) ->
-      N.As_id (p, N.Lvar (Env.new_lvar env x))
-  | As_id (p, _) ->
-      Errors.expected_variable p;
-      N.As_id (p, N.Lvar (Env.new_lvar env (p, "__internal_placeholder")))
-  | As_kv ((p1, Lvar x1), (p2, Lvar x2)) ->
-      let x1 = p1, N.Lvar (Env.new_lvar env x1) in
-      let x2 = p2, N.Lvar (Env.new_lvar env x2) in
-      N.As_kv (x1, x2)
+and as_expr env aw = function
+  | As_v ev ->
+      let vars = Naming_ast_helpers.GetLocals.lvalue SMap.empty ev in
+      SMap.iter (fun x p -> ignore (Env.new_lvar env (p, x))) vars;
+      let ev = expr env ev in
+      (match aw with
+        | None -> N.As_v ev
+        | Some p -> N.Await_as_v (p, ev))
+  | As_kv ((p1, Lvar k), ev) ->
+      let k = p1, N.Lvar (Env.new_lvar env k) in
+      let vars = Naming_ast_helpers.GetLocals.lvalue SMap.empty ev in
+      SMap.iter (fun x p -> ignore (Env.new_lvar env (p, x))) vars;
+      let ev = expr env ev in
+      (match aw with
+        | None -> N.As_kv (k, ev)
+        | Some p -> N.Await_as_kv (p, k, ev))
   | As_kv ((p, _), _) ->
       Errors.expected_variable p;
-      N.As_kv ((p, N.Lvar (Env.new_lvar env (p, "__internal_placeholder"))),
-               (p, N.Lvar (Env.new_lvar env (p, "__internal_placeholder"))))
+      let x1 = p, N.Lvar (Env.new_lvar env (p, "__internal_placeholder")) in
+      let x2 = p, N.Lvar (Env.new_lvar env (p, "__internal_placeholder")) in
+      (match aw with
+        | None -> N.As_kv (x1, x2)
+        | Some p -> N.Await_as_kv (p, x1, x2))
 
 and try_stmt env st b cl fb =
   let vars = Naming_ast_helpers.GetLocals.stmt SMap.empty st in
@@ -1447,15 +1536,19 @@ and expr_ env = function
   | Id x ->
     (match snd x with
       | "__LINE__" -> N.Int x
-      | "__CLASS__" ->
+      | "__CLASS__" | "__TRAIT__" ->
         (match (fst env).cclass with
-          | None ->
-              Errors.illegal_CLASS (fst x);
-              N.Any
-          | Some c -> N.String c)
+          | None -> Errors.illegal_CLASS (fst x); N.Any
+          | Some c ->
+            (* this isn't quite correct when inside a trait, as
+             * __CLASS__ is replaced by the using class, but it's
+             * sufficient for typechecking purposes (we require
+             * subclass to be compatible with the trait member/method
+             * declarations) *)
+            N.String c)
       | "__FILE__" | "__DIR__"
       (* could actually check that we are in a function, method, etc *)
-      | "__FUNCTION__" | "__METHOD__" | "__TRAIT__"
+      | "__FUNCTION__" | "__METHOD__"
       | "__NAMESPACE__"
         -> N.String x
       | _ -> N.Id (Env.global_const env x)
@@ -1536,9 +1629,12 @@ and expr_ env = function
           | (_, N.String cl), (_, N.String meth)
           | (_, N.Class_const (N.CI cl, (_, "class"))), (_, N.String meth) ->
             N.Smethod_id (Env.class_name env cl, meth)
-          | (p, _), (_) ->
-            Errors.illegal_class_meth p;
-            N.Any
+          | (p, N.Class_const ((N.CIself|N.CIstatic), (_, "class"))),
+            (_, N.String meth) ->
+            (match (fst env).cclass with
+              | Some cl -> N.Smethod_id (cl, meth)
+              | None -> Errors.illegal_class_meth p; N.Any)
+          | (p, _), (_) -> Errors.illegal_class_meth p; N.Any
           )
       | _ -> Errors.naming_too_many_arguments p; N.Any
       )
@@ -1595,14 +1691,39 @@ and expr_ env = function
         List.map (expr env) el)
   | Call (e, el) ->
       N.Call (N.Cnormal, expr env e, List.map (expr env) el)
-  | Yield_break -> N.Yield_break
-  | Yield e -> N.Yield (afield env e)
+  | Yield_break -> (snd env).has_yield := true; N.Yield_break
+  | Yield e -> (snd env).has_yield := true; N.Yield (afield env e)
   | Await e -> N.Await (expr env e)
   | List el -> N.List (exprl env el)
   | Expr_list el -> N.Expr_list (exprl env el)
   | Cast (ty, e2) ->
       hint_no_typedef env ty;
-      let ty = hint env ty in
+      let (p, x), hl = match ty with
+      | _, Happly (id, hl) -> (id, hl)
+      | _                  -> assert false in
+      let ty = match try_castable_hint env p x hl with
+      | Some ty -> p, ty
+      | None    -> begin
+      match x with
+      | "object" ->
+          (* (object) is a valid cast but not a valid type annotation *)
+          (* FIXME we are not modeling the correct runtime behavior here -- the
+           * runtime result type is an stdClass if the original type is
+           * primitive. But we should probably just disallow object casts
+           * altogether. *)
+          p, N.Hany
+      | "void"  ->
+          Errors.void_cast p;
+          p, N.Hany
+      | "unset"  ->
+          Errors.unset_cast p;
+          p, N.Hany
+      | _       ->
+          (* Let's just assume that any other invalid cases are attempts to
+           * cast to specific objects *)
+          Errors.object_cast p x;
+          hint env ty
+      end in
       N.Cast (ty, expr env e2)
   | Unop (uop, e) -> N.Unop (uop, expr env e)
   | Binop (Eq None as op, lv, e2) ->
@@ -1656,12 +1777,15 @@ and expr_ env = function
         ShapeMap.add name (expr env value) fdm
       end ShapeMap.empty fdl
       end
+  | Unsafeexpr _ ->
+      N.Any
 
 and expr_lambda env f =
   let h = opt_map (hint ~allow_this:true env) f.f_ret in
   let unsafe = List.mem Unsafe f.f_body in
   let variadicity, paraml = fun_paraml env f.f_params in
   let body = block env f.f_body in
+  let f_kind = fun_kind env f.f_fun_kind in
   {
     N.f_unsafe = unsafe;
     f_mode = (fst env).in_mode;
@@ -1671,7 +1795,7 @@ and expr_lambda env f =
     f_tparams = [];
     f_body = body;
     f_variadic = variadicity;
-    f_type = f.f_type;
+    f_fun_kind = f_kind;
   }
 
 and make_class_id env cid =
@@ -1762,15 +1886,7 @@ let check_constant cst =
       Errors.add_a_typehint (fst cst.cst_name)
   | None
   | Some _ -> ());
-  match snd cst.cst_value with
-  | Id _ | Null | True | False | Int _
-  | Float _ | String _
-  | Class_const _
-  | Unop ((Uplus | Uminus), _)
-  | String2 ([], _) -> ()
-  | String2 ((var_pos, _) :: _, _) ->
-      Errors.local_const var_pos
-  | _ -> Errors.illegal_constant (fst cst.cst_value)
+  check_constant_expr cst.cst_value
 
 let global_const genv cst =
   let env = Env.make_const_env genv cst in

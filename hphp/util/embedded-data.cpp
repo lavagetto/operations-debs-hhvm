@@ -26,8 +26,6 @@
 
 #include "folly/ScopeGuard.h"
 
-#include <libelf.h>
-#include <gelf.h>
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -37,6 +35,9 @@
 
 #ifdef __APPLE__
 #include <mach-o/getsect.h>
+#else
+#include <libelf.h>
+#include <gelf.h>
 #endif
 
 namespace HPHP {
@@ -49,7 +50,6 @@ bool get_embedded_data(const char *section, embedded_data* desc,
   HMODULE moduleHandle = GetModuleHandle(nullptr);
   HGLOBAL loadedResource;
   HRSRC   resourceInfo;
-  char *  resourceData;
   DWORD   resourceSize;
 
   resourceInfo = FindResource(moduleHandle, section, RT_RCDATA);

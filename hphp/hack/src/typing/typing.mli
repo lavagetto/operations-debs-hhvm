@@ -9,7 +9,8 @@
  *)
 open Utils
 
-val debug: bool ref
+val debug_print_last_pos:
+  'a -> unit
 
 val fun_decl:
   Nast.fun_ -> unit
@@ -21,9 +22,8 @@ val fun_def:
   Typing_env.env -> 'a -> Nast.fun_ -> unit
 val class_def:
   Typing_env.env -> 'a -> Nast.class_ -> unit
-
 val typedef_def:
-  Typing_env.env -> Nast.typedef -> unit
+  Typing_env.env -> string -> (bool * Nast.tparam list * Nast.hint) -> unit
 
 val expr:
   Typing_env.env -> Nast.expr -> Typing_env.env * Typing_defs.ty

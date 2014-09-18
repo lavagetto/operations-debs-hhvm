@@ -44,6 +44,13 @@ list(REMOVE_ITEM files
   ${FOLLY_DIR}/wangle/ThreadGate.cpp
   )
 
+check_include_file(INCLUDE "bits/functexcept.h" VARIABLE functexcept_present)
+if (functexcept_present)
+  list(REMOVE_ITEM files
+    ${FOLLY_DIR}/detail/FunctionalExcept.cpp
+  )
+endif()
+
 # Remove non-portable items
 if (NOT LINUX)
   list(REMOVE_ITEM files
