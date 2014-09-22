@@ -4,3 +4,4 @@ typos.patch
 # Wikimedia-specific (waiting for upstream merge)
 Make-RUSAGE_THREAD-available-to-getrusage.patch
 fix-sql-warning.patch
+ezc-fix-count-and-conversion-to-boolean.patch
