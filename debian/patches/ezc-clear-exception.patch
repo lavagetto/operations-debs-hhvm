@@ -1,0 +1,79 @@
+From 6771fe673f5c2e5d9998ca349f48679f1480a1f9 Mon Sep 17 00:00:00 2001
+From: Tim Starling <tstarling@wikimedia.org>
+Date: Wed, 24 Sep 2014 15:05:05 +1000
+Subject: [PATCH] EZC: clear EG(exception) on return from zend_wrap_func()
+
+Otherwise, if the exception is caught and then control is returned into
+a zend_call_function() call which wrapped the throwing function, then
+zend_call_function() will erroneously rethrow the exception, even though
+it has already been handled.
+
+https://bugzilla.wikimedia.org/show_bug.cgi?id=71174
+---
+ hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.cpp        | 13 +++++++++++--
+ .../slow/ext_ezc_test/caught-exception-recursive.expectf    |  1 +
+ hphp/test/slow/ext_ezc_test/caught-exception-recursive.php  |  7 +++++++
+ 3 files changed, 19 insertions(+), 2 deletions(-)
+ create mode 100644 hphp/test/slow/ext_ezc_test/caught-exception-recursive.expectf
+ create mode 100644 hphp/test/slow/ext_ezc_test/caught-exception-recursive.php
+
+diff --git a/hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.cpp b/hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.cpp
+index 52379fb..3a53315 100644
+--- a/hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.cpp
++++ b/hphp/runtime/ext_zend_compat/hhvm/zend-wrap-func.cpp
+@@ -20,6 +20,7 @@
+ #include "hphp/runtime/ext_zend_compat/php-src/Zend/zend.h"
+ #include "hphp/runtime/ext_zend_compat/php-src/TSRM/TSRM.h"
+ #include "hphp/runtime/ext_zend_compat/php-src/Zend/zend_exceptions.h"
++#include "hphp/runtime/ext_zend_compat/php-src/Zend/zend_globals.h"
+ #include "hphp/runtime/vm/jit/translator-inline.h"
+ 
+ namespace HPHP {
+@@ -42,6 +43,14 @@ void zBoxAndProxy(TypedValue* arg) {
+   }
+ }
+ 
++static void zend_wrap_func_cleanup() {
++    ZendExecutionStack::popHHVMStack();
++    if (EG(exception)) {
++      zval_ptr_dtor(&EG(exception));
++      EG(exception) = NULL;
++    }
++}
++
+ TypedValue* zend_wrap_func(ActRec* ar) {
+   // Sync the translator state.
+   // We need to do this before a native function calls into a C library
+@@ -86,10 +95,10 @@ TypedValue* zend_wrap_func(ActRec* ar) {
+       TSRMLS_CC
+     );
+   } catch (...) {
+-    ZendExecutionStack::popHHVMStack();
++    zend_wrap_func_cleanup();
+     throw;
+   }
+-  ZendExecutionStack::popHHVMStack();
++  zend_wrap_func_cleanup();
+ 
+   // If an exception was caught, rethrow it
+   ZendExceptionStore& exceptionStore = ZendExceptionStore::getInstance();
+diff --git a/hphp/test/slow/ext_ezc_test/caught-exception-recursive.expectf b/hphp/test/slow/ext_ezc_test/caught-exception-recursive.expectf
+new file mode 100644
+index 0000000..5c0c068
+--- /dev/null
++++ b/hphp/test/slow/ext_ezc_test/caught-exception-recursive.expectf
+@@ -0,0 +1 @@
++bool(false)
+diff --git a/hphp/test/slow/ext_ezc_test/caught-exception-recursive.php b/hphp/test/slow/ext_ezc_test/caught-exception-recursive.php
+new file mode 100644
+index 0000000..9ef56f3
+--- /dev/null
++++ b/hphp/test/slow/ext_ezc_test/caught-exception-recursive.php
+@@ -0,0 +1,7 @@
++<?php
++var_dump(ezc_try_call(function () {
++  try {
++    ezc_throw('Exception');
++  } catch ( Exception $e ) {}
++  return false;
++}));
