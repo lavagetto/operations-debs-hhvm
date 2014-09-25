@@ -1,3 +1,10 @@
+hhvm (3.3.0-20140925+wmf1) UNRELEASED; urgency=medium
+
+  * New upstream version
+  * Added a few patches to fix bugs in production 
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Thu, 25 Sep 2014 12:01:11 +0200
+
 hhvm (3.3.0-20140918+wmf1) trusty-wikimedia; urgency=medium
 
   * New upstream version
