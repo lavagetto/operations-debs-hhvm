@@ -6,3 +6,4 @@ Make-RUSAGE_THREAD-available-to-getrusage.patch
 fix-sql-warning.patch
 ezc-fix-count-and-conversion-to-boolean.patch
 ezc-clear-exception.patch
+support-custom-stream-wrappers-in-xmlreader.patch
