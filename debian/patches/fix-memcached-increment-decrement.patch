@@ -1,0 +1,57 @@
+Description: workaround to make Memcached::increment & Memcached::decrement work.
+ This is a workaround https://github.com/facebook/hhvm/issues/3839: we silently discard 
+ unsupported (and for Wikimedia, unused) arguments to Memcached::increment & Memcached::decrement
+ that would only work when using the binary protocol
+Author: Ori Livneh <ori@wikimedia.org>
+Forwarded: No
+Last-Updated: 20140925
+
+--- i/hphp/runtime/ext/memcached/ext_memcached.cpp
++++ w/hphp/runtime/ext/memcached/ext_memcached.cpp
+@@ -462,12 +462,10 @@ class MemcachedData {
+                           payload.data(), payload.size(), expiration, flags));
+   }
+   typedef memcached_return_t (*IncDecOperation)(memcached_st *, const char *,
+-      size_t, const char *, size_t, uint64_t, uint64_t, time_t, uint64_t *);
++      size_t, const char *, size_t, uint64_t, uint64_t *);
+   Variant incDecOperationImpl(IncDecOperation op, const String& server_key,
+                                                   const String& key,
+-                                                  int64_t offset,
+-                                                  int64_t inital_value,
+-                                                  int64_t expiry) {
++                                                  int64_t offset) {
+     m_impl->rescode = q_Memcached$$RES_SUCCESS;
+     if (key.empty()) {
+       m_impl->rescode = q_Memcached$$RES_BAD_KEY_PROVIDED;
+@@ -482,8 +480,7 @@ class MemcachedData {
+     const String& myServerKey = server_key.empty() ? key : server_key;
+     if (!handleError(op(&m_impl->memcached, myServerKey.c_str(),
+                         myServerKey.length(), key.c_str(), key.length(),
+-                        (uint32_t)offset, (uint32_t)inital_value,
+-                        (uint32_t)expiry, &value))) {
++                        (uint32_t)offset, &value))) {
+       return false;
+     }
+     return (int64_t)value;
+@@ -747,8 +744,8 @@ Variant HHVM_METHOD(Memcached, incrementbykey, const String& server_key,
+                                                int64_t inital_value /*= 0*/,
+                                                int64_t expiry /*= 0*/) {
+   auto data = Native::data<MemcachedData>(this_);
+-  return data->incDecOperationImpl(memcached_increment_with_initial_by_key,
+-                                server_key, key, offset, inital_value, expiry);
++  return data->incDecOperationImpl(memcached_increment_by_key,
++                                server_key, key, offset);
+ }
+
+ Variant HHVM_METHOD(Memcached, decrementbykey, const String& server_key,
+@@ -757,8 +754,8 @@ Variant HHVM_METHOD(Memcached, decrementbykey, const String& server_key,
+                                                int64_t inital_value /*= 0*/,
+                                                int64_t expiry /*= 0*/) {
+   auto data = Native::data<MemcachedData>(this_);
+-  return data->incDecOperationImpl(memcached_decrement_with_initial_by_key,
+-                                server_key, key, offset, inital_value, expiry);
++  return data->incDecOperationImpl(memcached_decrement_by_key,
++                                server_key, key, offset);
+ }
+
+ bool HHVM_METHOD(Memcached, addserver, const String& host, int port,
