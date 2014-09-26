@@ -1,4 +1,10 @@
-hhvm (3.3.0-20140925+wmf1) UNRELEASED; urgency=medium
+hhvm (3.3.0-20140925+wmf2) trusty-wikimedia; urgency=medium
+
+  * Fix config files path. 
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Fri, 26 Sep 2014 08:00:57 +0200
+
+hhvm (3.3.0-20140925+wmf1) trusty-wikimedia; urgency=medium
 
   * New upstream version
   * Added a few patches to fix bugs in production 

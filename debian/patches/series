@@ -1,5 +1,6 @@
 remove_libpam.patch
 typos.patch
+fix-config-path.patch
 
 # Wikimedia-specific (waiting for upstream merge)
 Make-RUSAGE_THREAD-available-to-getrusage.patch
