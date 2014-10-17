@@ -1,3 +1,9 @@
+hhvm (3.3.0-20140925+wmf3) trusty-wikimedia; urgency=medium
+
+  * Added https://github.com/facebook/hhvm/pull/4000 
+
+ -- Giuseppe Lavagetto <glavagetto@wikimedia.org>  Fri, 17 Oct 2014 21:59:36 +0200
+
 hhvm (3.3.0-20140925+wmf2) trusty-wikimedia; urgency=medium
 
   * Fix config files path. 

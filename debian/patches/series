@@ -9,3 +9,4 @@ ezc-fix-count-and-conversion-to-boolean.patch
 ezc-clear-exception.patch
 support-custom-stream-wrappers-in-xmlreader.patch
 fix-memcached-increment-decrement.patch
+Only-initialze-sweepables-on-new-threads.patch
