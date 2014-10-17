@@ -13,7 +13,7 @@ override_dh_auto_build:
 	./hphp/parser/make-lexer.sh
 	# Disabled because of https://github.com/facebook/hhvm/issues/2573
 	#./hphp/parser/make-parser.sh
-	dh_auto_build
+	VERBOSE=1 dh_auto_build
 
 override_dh_auto_configure:
 	dh_auto_configure -- \
